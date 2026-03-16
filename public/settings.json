@@ -1,0 +1,16 @@
+{
+  "defaultFontStack": {
+    "sans": "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
+    "mono": "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace"
+  },
+  "testText": "The quick brown fox jumps over the lazy dog. 0123456789 色彩与文字 Aa",
+  "testColors": [
+    "#e03c31",
+    "#f2a900",
+    "#7fb339",
+    "#00a4a6",
+    "#5b5ea6",
+    "#9b59b6"
+  ],
+  "autoSwitchIntervalMs": 5000
+}

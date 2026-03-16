@@ -1,0 +1,66 @@
+{
+    "studioName": "AV Studio Screen Tester",
+    "version": "1.0.0",
+    "theme": {
+      "primary": "#ffffff",
+      "background": "#0a0a0a",
+      "accent": "#ff3e00",
+      "uiOpacity": 0.8,
+      "fontFamily": "'Inter', 'Geist Mono', sans-serif"
+    },
+    "modes": {
+      "colorTest": {
+        "enabled": true,
+        "label": "Color Flow",
+        "colors": ["#ffffff", "#000000", "#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff00ff", "#00ffff"],
+        "transitionDuration": 0.5,
+        "showSmpteBars": true
+      },
+      "gridTest": {
+        "enabled": true,
+        "label": "Geometry & Grids",
+        "lineThickness": 1,
+        "gridSizes": [20, 50, 100],
+        "colors": ["#333333", "#ffffff"],
+        "showCrosshair": true,
+        "showCircles": true
+      },
+      "typoTest": {
+        "enabled": true,
+        "label": "Typography Stress",
+        "content": "TYPE PERFORMANCE TEST 0123456789",
+        "fontWeights": [100, 300, 400, 700, 900],
+        "sizes": [12, 16, 24, 48, 72, 120],
+        "lineHeight": 1.2,
+        "letterSpacing": "-0.02em"
+      },
+      "noiseTest": {
+        "enabled": true,
+        "label": "Bit-depth & Noise",
+        "grainOpacity": 0.05,
+        "bitDepthSteps": 16,
+        "animateNoise": true
+      }
+    },
+    "screensaver": {
+      "autoStartDelay": 30000,
+      "cycleInterval": 8000,
+      "randomizeOrder": true,
+      "animationMode": "gentle-zoom",
+      "transitions": {
+        "type": "cross-fade",
+        "ease": "easeInOutQuart"
+      }
+    },
+    "interactive": {
+      "showCursor": false,
+      "enableTooltips": true,
+      "sidebarPosition": "left",
+      "hotkeys": {
+        "toggleMenu": "m",
+        "nextMode": "ArrowRight",
+        "prevMode": "ArrowLeft",
+        "toggleFullscreen": "f"
+      }
+    }
+  }

@@ -1,0 +1,135 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+  Cargo 极大化视觉（参考 cargo.site 模板）：
+  - 大面积色块分割，取消细边框
+  - 流体排版：clamp / vw 超大文字，标题占屏宽 20%+
+  - 极粗无衬线体，字间距 -0.05em，行高 0.8–0.9
+  - 极高对比：纯黑/纯白、纯色块
+*/
+
+:root {
+  --theme-background: #000000;
+  --theme-primary: #ffffff;
+  --theme-accent: #ff0000;
+
+  --font-stack-sans: "Inter", system-ui, sans-serif;
+  /* UI 标题与按钮：Montserrat 全小写风格 */
+  --font-ui: "Montserrat", system-ui, sans-serif;
+  /* 极粗无衬线：标题与强调用 */
+  --font-display: "Archivo Black", "Inter", system-ui, sans-serif;
+  --font-stack-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* 流体排版：标题占屏宽 20%+，随窗口缩放 */
+  --title-fluid: clamp(2.5rem, 22vw, 22rem);
+  --subtitle-fluid: clamp(1.25rem, 8vw, 6rem);
+  --body-fluid: clamp(0.875rem, 2vw, 1.125rem);
+
+  /* 紧凑压迫感 */
+  --letter-spacing-tight: -0.05em;
+  --line-height-tight: 0.85;
+  --line-height-display: 0.9;
+
+  --nav-rail: 0;
+  /* 导航模式按钮：西柚色（悬停/选中仅改字色，无背景方框） */
+  --nav-mode-active: #e8a598;
+
+  /* 兼容旧引用 */
+  --text: var(--theme-primary);
+  --text-h: var(--theme-primary);
+  --bg: var(--theme-background);
+  --border: var(--theme-primary);
+  --muted: var(--theme-primary);
+  --accent: var(--theme-accent);
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-stack-sans);
+  color: var(--theme-primary);
+  background: var(--theme-background);
+  -webkit-font-smoothing: antialiased;
+}
+
+
+/* 流体标题：极大化，占屏宽 20%+ */
+.font-fluid-title {
+  font-family: var(--font-display);
+  font-size: var(--title-fluid);
+  font-weight: 900;
+  letter-spacing: var(--letter-spacing-tight);
+  line-height: var(--line-height-display);
+}
+
+.font-fluid-subtitle {
+  font-family: var(--font-display);
+  font-size: var(--subtitle-fluid);
+  font-weight: 900;
+  letter-spacing: var(--letter-spacing-tight);
+  line-height: var(--line-height-tight);
+}
+
+/* UI 字体：标题与按钮使用 Montserrat、全小写 */
+.font-ui {
+  font-family: var(--font-ui);
+  text-transform: lowercase;
+}
+
+/* 按钮：保留过渡，水波纹由组件处理 */
+button {
+  position: relative;
+  overflow: hidden;
+  transition: opacity 0.2s ease, background-color 0.2s ease;
+}
+
+@keyframes ripple {
+  from {
+    opacity: 0.5;
+    transform: scale(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
+#root {
+  min-height: 100vh;
+  min-height: 100dvh;
+  width: 100%;
+  padding-left: var(--nav-rail);
+  box-sizing: border-box;
+}
+
+/* 导航：大色块，无细边框 */
+.nav-item {
+  color: var(--theme-primary);
+  opacity: 0.7;
+}
+.nav-item:hover {
+  background-color: var(--theme-accent);
+  color: var(--theme-background);
+  opacity: 1;
+}
+.nav-item-active {
+  background-color: var(--theme-primary);
+  color: var(--theme-background);
+  opacity: 1;
+}
+
+/* 底部导航模式按钮：悬停西柚色，选中无背景仅字色；取消焦点白/橙边框 */
+.nav-mode-btn:hover {
+  color: var(--nav-mode-active) !important;
+  background-color: transparent !important;
+}
+.nav-mode-btn:focus,
+.nav-mode-btn:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
