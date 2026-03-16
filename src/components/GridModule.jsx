@@ -271,6 +271,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
   const [bitDepthDither, setBitDepthDither] = useState(true) // true = imageSmoothingEnabled
   const [testModeHintVisible, setTestModeHintVisible] = useState(false)
   const testModeHintTimeoutRef = useRef(null)
+  const [isNarrowColorOffset, setIsNarrowColorOffset] = useState(false) // COLOR OFFSET 窄屏堆叠模式：width < 1024 或竖屏
   const REF_GRAY = { low: 32, mid: 128, high: 224 }
   const [calibrationData, setCalibrationData] = useState(() => ({
     low: { r: 0, g: 0, b: 0 },
@@ -345,6 +346,18 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
       window.removeEventListener('mousemove', handleMouseMove)
       if (hideTimeout) clearTimeout(hideTimeout)
     }
+  }, [])
+
+  // COLOR OFFSET 自适应布局：窄屏 / 竖屏时启用上下堆叠模式
+  useEffect(() => {
+    const updateNarrow = () => {
+      const w = window.innerWidth || 0
+      const h = window.innerHeight || 0
+      setIsNarrowColorOffset(w < 1024 || (w > 0 && h > w))
+    }
+    updateNarrow()
+    window.addEventListener('resize', updateNarrow)
+    return () => window.removeEventListener('resize', updateNarrow)
   }, [])
 
   // 固定模式：方格数由 gridSizeNum 决定
@@ -557,7 +570,6 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
         const adjR = Math.min(255, Math.max(0, base + offsetR))
         const adjG = Math.min(255, Math.max(0, base + offsetG))
         const adjB = Math.min(255, Math.max(0, base + offsetB))
-        const trackWidth = 220
         const chartW = 200
         const chartH = 100
         const scaleY = (v) => chartH / 2 - (v / 30) * (chartH / 2 - 8)
@@ -587,9 +599,15 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
                 [ ] 档位 · ↑↓ 步进
               </span>
             </div>
-            <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-0 bg-black">
-              {/* 核心测试场：REF(左) 档位灰 / ADJ(右) 档位+偏移，无缝；档位器浮在灰块上方 */}
-              <div className="relative shrink-0" style={{ width: 1000, height: 500 }}>
+            <div
+              className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-0 bg-black"
+              style={{ transition: 'all 0.3s ease' }}
+            >
+              {/* 核心测试场：REF / ADJ 对比区域；窄屏下上下堆叠，宽屏并排 */}
+              <div
+                className="relative shrink-0 w-full max-w-[1000px]"
+                style={{ height: isNarrowColorOffset ? '40vh' : 500, transition: 'all 0.3s ease' }}
+              >
                 {/* 极简档位器：浮在灰色块上方中央，稍下移避免与灰块边缘重叠 */}
                 <div className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center" style={{ top: 28, zIndex: 50 }}>
                   <div className="flex items-center justify-center gap-12 mb-2">
@@ -627,34 +645,32 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
                     />
                   </div>
                 </div>
-                <div className="flex flex-nowrap items-stretch w-full h-full">
-                <div
-                  className="shrink-0"
-                  style={{ width: 500, height: 500, backgroundColor: `rgb(${base}, ${base}, ${base})` }}
-                  aria-label="REF"
-                />
-                <div
-                  className="shrink-0"
-                  style={{
-                    width: 500,
-                    height: 500,
-                    backgroundColor: flickerMode && flickerPhase === 1
-                      ? `rgb(${base}, ${base}, ${base})`
-                      : `rgb(${Math.round(adjR)}, ${Math.round(adjG)}, ${Math.round(adjB)})`,
-                    transition: flickerMode ? 'none' : 'background-color 0.08s ease',
-                  }}
-                  aria-label="ADJ"
-                />
+                <div className={`flex w-full h-full ${isNarrowColorOffset ? 'flex-col' : 'flex-row'} items-stretch`}>
+                  <div
+                    className="flex-1"
+                    style={{ backgroundColor: `rgb(${base}, ${base}, ${base})` }}
+                    aria-label="REF"
+                  />
+                  <div
+                    className="flex-1"
+                    style={{
+                      backgroundColor: flickerMode && flickerPhase === 1
+                        ? `rgb(${base}, ${base}, ${base})`
+                        : `rgb(${Math.round(adjR)}, ${Math.round(adjG)}, ${Math.round(adjB)})`,
+                      transition: flickerMode ? 'none' : 'background-color 0.08s ease',
+                    }}
+                    aria-label="ADJ"
+                  />
                 </div>
               </div>
 
-              {/* 控制器 + 量化分析图：图左对齐 R 滑块左端，图右对齐 Reset 右端 */}
+              {/* 控制器 + 量化分析图：窄屏下垂直堆叠，滑块宽度 90% 视口；图表在滑块下方 */}
               <div
                 className="flex flex-col items-center mt-2"
                 style={{ display: 'inline-flex', alignSelf: 'center', zIndex: 50 }}
               >
                 <div
-                  className="flex items-end justify-center gap-12 px-6 py-4"
+                  className={`flex ${isNarrowColorOffset ? 'flex-col items-stretch gap-4' : 'items-end justify-center gap-12'} px-6 py-4`}
                   style={{ fontFamily: 'Montserrat, sans-serif', fontSize: '10px', color: '#e0e0e0' }}
                 >
                 {[
@@ -662,7 +678,6 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
                   { label: 'G', value: offsetG, setValue: setOffsetG, axis: 1 },
                   { label: 'B', value: offsetB, setValue: setOffsetB, axis: 2 },
                 ].map(({ label, value, setValue, axis }) => {
-                  const thumbLeft = ((value + 30) / 60) * (trackWidth - 1)
                   const axisColor = axis === activeOffsetAxis ? (axis === 0 ? '#e66' : axis === 1 ? '#6e6' : '#66e') : '#e0e0e0'
                   return (
                     <div
@@ -676,17 +691,39 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
                       <span style={{ marginBottom: 4, color: axisColor }}>Δ{label}: {value >= 0 ? '+' : ''}{value}</span>
                       <div
                         className="relative"
-                        style={{ width: trackWidth, height: 10 }}
+                        style={{
+                          width: isNarrowColorOffset ? '90vw' : 220,
+                          maxWidth: isNarrowColorOffset ? '100%' : 220,
+                          height: isNarrowColorOffset ? 16 : 10,
+                        }}
                         onClick={(e) => {
                           const rect = e.currentTarget.getBoundingClientRect()
-                          const v = Math.round((e.clientX - rect.left) / (trackWidth - 1) * 60 - 30)
+                          const width = Math.max(1, rect.width)
+                          const v = Math.round((e.clientX - rect.left) / (width - 1) * 60 - 30)
                           setValue(Math.max(-30, Math.min(30, v)))
                         }}
                       >
-                        <div style={{ position: 'absolute', left: 0, top: 4, width: trackWidth, height: 1, backgroundColor: trackColor, shapeRendering: 'crispEdges' }} />
                         <div
                           style={{
-                            position: 'absolute', left: thumbLeft, top: 0, width: 1, height: 10, backgroundColor: trackColor, cursor: 'ew-resize', shapeRendering: 'crispEdges',
+                            position: 'absolute',
+                            left: 0,
+                            top: isNarrowColorOffset ? 7 : 4,
+                            width: '100%',
+                            height: 1,
+                            backgroundColor: trackColor,
+                            shapeRendering: 'crispEdges',
+                          }}
+                        />
+                        <div
+                          style={{
+                            position: 'absolute',
+                            left: `${((value + 30) / 60) * 100}%`,
+                            top: 0,
+                            width: 1,
+                            height: isNarrowColorOffset ? 16 : 10,
+                            backgroundColor: trackColor,
+                            cursor: 'ew-resize',
+                            shapeRendering: 'crispEdges',
                           }}
                           onMouseDown={(e) => {
                             e.preventDefault()
@@ -694,7 +731,8 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
                             const track = e.currentTarget.parentElement
                             const move = (e2) => {
                               const rect = track.getBoundingClientRect()
-                              const v = Math.round((e2.clientX - rect.left) / (trackWidth - 1) * 60 - 30)
+                              const width = Math.max(1, rect.width)
+                              const v = Math.round((e2.clientX - rect.left) / (width - 1) * 60 - 30)
                               setValue(Math.max(-30, Math.min(30, v)))
                             }
                             window.addEventListener('mousemove', move)
@@ -705,25 +743,35 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
                     </div>
                   )
                 })}
-                <button
-                  type="button"
-                  onClick={() => setFlickerMode((f) => !f)}
-                  className="px-2 py-1 rounded border border-[#444] text-[10px] outline-none"
-                  style={{ fontFamily: 'Montserrat, sans-serif', color: flickerMode ? '#FF6B4A' : '#888', background: flickerMode ? 'rgba(255,107,74,0.1)' : 'transparent' }}
+                <div
+                  className={`flex gap-2 mt-8 ${isNarrowColorOffset ? 'flex-col mx-auto' : 'flex-row items-center'}`}
+                  style={isNarrowColorOffset ? { width: '90vw', maxWidth: '100%' } : undefined}
                 >
-                  Flicker: {flickerMode ? 'on' : 'off'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setCalibrationData({ low: { r: 0, g: 0, b: 0 }, mid: { r: 0, g: 0, b: 0 }, high: { r: 0, g: 0, b: 0 } })}
-                  className="px-2 py-1 rounded border border-[#444] text-[10px] outline-none"
-                  style={{ fontFamily: 'Montserrat, sans-serif', color: '#888' }}
-                >
-                  Reset
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => setFlickerMode((f) => !f)}
+                    className={`px-2 py-1 rounded border border-[#444] text-[10px] outline-none text-center ${isNarrowColorOffset ? 'w-full' : ''}`}
+                    style={{ fontFamily: 'Montserrat, sans-serif', color: flickerMode ? '#FF6B4A' : '#888', background: flickerMode ? 'rgba(255,107,74,0.1)' : 'transparent' }}
+                  >
+                    Flicker: {flickerMode ? 'on' : 'off'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setCalibrationData((prev) => ({
+                        ...prev,
+                        [calibrationLevel]: { r: 0, g: 0, b: 0 },
+                      }))
+                    }
+                    className={`px-2 py-1 rounded border border-[#444] text-[10px] outline-none text-center ${isNarrowColorOffset ? 'w-full' : ''}`}
+                    style={{ fontFamily: 'Montserrat, sans-serif', color: '#888' }}
+                  >
+                    Reset
+                  </button>
                 </div>
-                {/* 量化分析图：宽度为上一行的 95%，居中 */}
-                <div className="mt-6 mx-auto" style={{ width: '95%', minHeight: chartH }}>
+                </div>
+                {/* 量化分析图：窄屏与滑块一致 90vw，宽屏维持 95% */}
+                <div className="mt-6 mx-auto" style={{ width: isNarrowColorOffset ? '90vw' : '95%', maxWidth: isNarrowColorOffset ? '100%' : undefined, minHeight: chartH }}>
                   <svg
                     width="100%"
                     height={chartH}

@@ -28,12 +28,13 @@ function App() {
   const [activeModule, setActiveModule] = useState('grid')
   const [isNavVisible, setIsNavVisible] = useState(false)
   const [isTransitioning, setIsTransitioning] = useState(false)
-  const [isAutoPlay, setIsAutoPlay] = useState(true) // 自动轮播开关
+  const [isAutoPlay, setIsAutoPlay] = useState(true) // 自动轮播开关（如 P 键）
+  const [isPaused, setIsPaused] = useState(false)    // 触屏/长按暂停，true 时停止轮播
   const pendingModuleRef = useRef(null)
 
-  // 自动轮播 - 受 isAutoPlay 控制
+  // 自动轮播 - 受 isAutoPlay 与 isPaused 控制
   useEffect(() => {
-    if (!isAutoPlay) return
+    if (!isAutoPlay || isPaused) return
     const interval = setInterval(() => {
       setActiveModule((prev) => {
         const currentIndex = MODULES.findIndex((m) => m.id === prev)
@@ -42,7 +43,7 @@ function App() {
       })
     }, AUTO_CYCLE_INTERVAL)
     return () => clearInterval(interval)
-  }, [isAutoPlay])
+  }, [isAutoPlay, isPaused])
 
   // 切换模块 - 无闪黑，仅切换内容（闪黑测试仅在 Grid 内）
   const switchModule = useCallback((moduleId) => {
@@ -75,6 +76,50 @@ function App() {
       document.exitFullscreen()
     }
   }, [])
+
+  // 触屏/鼠标长按 ≥200ms：切换 isPaused（暂停/恢复轮播），并显示边缘呼吸光
+  const HOLD_MS = 200
+  const holdTimerRef = useRef(null)
+  const [showHoldGlow, setShowHoldGlow] = useState(false)
+
+  const clearHoldTimer = useCallback(() => {
+    if (holdTimerRef.current) {
+      clearTimeout(holdTimerRef.current)
+      holdTimerRef.current = null
+    }
+    setShowHoldGlow(false)
+  }, [])
+
+  useEffect(() => {
+    const onHold = () => {
+      setShowHoldGlow(true)
+      setIsPaused((p) => !p)
+    }
+    const onPointerDown = (e) => {
+      clearHoldTimer()
+      holdTimerRef.current = setTimeout(onHold, HOLD_MS)
+    }
+    const onPointerUp = () => {
+      clearHoldTimer()
+    }
+    const root = document.getElementById('app-root')
+    if (!root) return
+    root.addEventListener('touchstart', onPointerDown, { passive: true })
+    root.addEventListener('touchend', onPointerUp, { passive: true })
+    root.addEventListener('touchcancel', onPointerUp, { passive: true })
+    root.addEventListener('mousedown', onPointerDown)
+    window.addEventListener('mouseup', onPointerUp)
+    window.addEventListener('mouseleave', onPointerUp)
+    return () => {
+      clearHoldTimer()
+      root.removeEventListener('touchstart', onPointerDown)
+      root.removeEventListener('touchend', onPointerUp)
+      root.removeEventListener('touchcancel', onPointerUp)
+      root.removeEventListener('mousedown', onPointerDown)
+      window.removeEventListener('mouseup', onPointerUp)
+      window.removeEventListener('mouseleave', onPointerUp)
+    }
+  }, [clearHoldTimer])
 
   // 键盘：P 轮播开关、F 全屏、空格下一模块（不用数字键切换模块）
   useEffect(() => {
@@ -151,7 +196,18 @@ function App() {
   const currentIndex = MODULES.findIndex(m => m.id === activeModule)
 
   return (
-    <div className="fixed inset-0 bg-black">
+    <div id="app-root" className="fixed inset-0 bg-black">
+      {/* 长按 ≥200ms 时边缘极淡 1px 粉色呼吸光 */}
+      {showHoldGlow && (
+        <div
+          className="pointer-events-none fixed inset-0 z-[100]"
+          style={{
+            boxShadow: 'inset 0 0 0 1px rgba(255, 100, 120, 0.35)',
+            animation: 'hold-glow-breathe 1.2s ease-in-out infinite',
+          }}
+          aria-hidden
+        />
+      )}
       {/* 主内容 */}
       <AnimatePresence mode="wait">
         {!isTransitioning && (
@@ -191,9 +247,9 @@ function App() {
         {/* 左侧：自动播放状态 */}
         <span
           className="absolute left-4 text-[10px] font-ui flex items-center gap-2"
-          style={{ color: isAutoPlay ? 'rgba(255,255,255,0.5)' : 'rgba(255,100,100,0.7)' }}
+          style={{ color: isAutoPlay && !isPaused ? 'rgba(255,255,255,0.5)' : 'rgba(255,100,100,0.7)' }}
         >
-          {isAutoPlay ? 'auto' : 'paused'}
+          {isAutoPlay && !isPaused ? 'auto' : 'paused'}
         </span>
 
         {/* 中间：模块按钮 - 悬停西柚色，选中无背景仅改字色 */}

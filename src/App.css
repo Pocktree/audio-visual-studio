@@ -1,1 +1,7 @@
 /* App-specific overrides if needed */
+
+/* 长按暂停反馈：边缘 1px 粉色呼吸光 */
+@keyframes hold-glow-breathe {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.6; }
+}

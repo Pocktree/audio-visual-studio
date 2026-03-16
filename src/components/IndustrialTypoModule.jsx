@@ -8,6 +8,11 @@ const WIDE_GAMUT = {
   white: 'color(display-p3 1 1 1)',
   black: '#000000',
 }
+// AUDIO-VISUAL 下半区默认块色：西柚色 / 薄荷绿
+const BLOCK_COLORS = {
+  heavy: '#ff7f50',   // 西柚色
+  light: '#00FFCC',  // 薄荷绿
+}
 
 // SMPTE 75% 彩条
 const SMPTE_BARS = [
@@ -108,7 +113,7 @@ export function IndustrialTypoModule({ fontFamily }) {
   // 背景和文字颜色
   const bgColor = invertColors ? WIDE_GAMUT.white : WIDE_GAMUT.black
   const textColor = invertColors ? WIDE_GAMUT.black : WIDE_GAMUT.white
-  const blockColor = fontWeight === 900 ? WIDE_GAMUT.red : WIDE_GAMUT.green
+  const blockColor = fontWeight === 900 ? BLOCK_COLORS.heavy : BLOCK_COLORS.light
   // 本模式使用的色值（用于左上角显示）
   const traceColorHex = invertColors ? '#FF6B4A' : '#00FFCC'
   // 走马灯颜色切换速率（SMPTE/GRAY 为 1 index/s，FLUID 无）
@@ -282,24 +287,9 @@ export function IndustrialTypoModule({ fontFamily }) {
           </div>
         )}
 
-        {/* 默认状态：显示字重 */}
+        {/* 默认状态：西柚色 / 薄荷绿块，无数字 */}
         {colorTestMode === 'none' && (
-          <div 
-            className="w-full h-full flex items-center justify-center"
-            style={{ backgroundColor: blockColor }}
-          >
-            <span 
-              className="font-black tracking-tighter"
-              style={{
-                fontFamily: fontStack,
-                fontSize: 'clamp(4rem, 20vw, 16rem)',
-                color: WIDE_GAMUT.white,
-                textShadow: '0 0 40px rgba(0,0,0,0.5)',
-              }}
-            >
-              {fontWeight}
-            </span>
-          </div>
+          <div className="w-full h-full" style={{ backgroundColor: blockColor }} />
         )}
       </div>
 
