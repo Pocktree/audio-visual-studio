@@ -42,16 +42,30 @@ export function FullWindowType() {
   const CROP_Y_OFFSET = 0.14   // viewBox y 下移 14%
   const CROP_HEIGHT = 0.70    // height 取 70%（上下继续裁切撑满）
   const CROP_X = 0.06         // 左右各裁 6%（负 margin 效果）
+  const MIN_VIEWBOX_SIZE = 30 // 最小 viewBox 尺寸，防止宽屏下字体消失
   const updateViewBoxFromBBox = useCallback(() => {
     const el = textRef.current
     if (!el || typeof el.getBBox !== 'function') return
     const bbox = el.getBBox()
     if (bbox.width <= 0 || bbox.height <= 0) return
     setLastBbox(bbox)
-    const vy = bbox.y + bbox.height * CROP_Y_OFFSET
-    const vh = bbox.height * CROP_HEIGHT
-    const vx = bbox.x + bbox.width * CROP_X
-    const vw = bbox.width * (1 - 2 * CROP_X)
+    
+    // 计算原始 viewBox
+    let vy = bbox.y + bbox.height * CROP_Y_OFFSET
+    let vh = bbox.height * CROP_HEIGHT
+    let vx = bbox.x + bbox.width * CROP_X
+    let vw = bbox.width * (1 - 2 * CROP_X)
+    
+    // 添加最小尺寸限制，防止宽屏下字体过小或消失
+    if (vw < MIN_VIEWBOX_SIZE) {
+      vx = bbox.x - (MIN_VIEWBOX_SIZE - vw) / 2
+      vw = MIN_VIEWBOX_SIZE
+    }
+    if (vh < MIN_VIEWBOX_SIZE) {
+      vy = bbox.y - (MIN_VIEWBOX_SIZE - vh) / 2
+      vh = MIN_VIEWBOX_SIZE
+    }
+    
     if (vw <= 0 || vh <= 0) return
     setViewBox(`${vx} ${vy} ${vw} ${vh}`)
   }, [])
@@ -254,7 +268,7 @@ export function FullWindowType() {
             textAnchor="middle"
             dominantBaseline="central"
             fontSize="100"
-            fontFamily="Inter, 'Archivo Black', system-ui, sans-serif"
+            fontFamily="'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans CN', 'Heiti SC', Inter, 'Archivo Black', system-ui, sans-serif"
             fontWeight={fontWeight}
             fill={outlineMode ? 'none' : textColor}
             stroke={outlineMode ? textColor : waveEnabled ? textColor : 'none'}

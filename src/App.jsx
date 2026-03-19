@@ -12,20 +12,20 @@ import { PerformanceMonitor } from './components/PerformanceMonitor'
 import { RippleButton } from './components/RippleButton'
 import './App.css'
 
-// 模块定义 - 自动轮播（已取消 invert，并入 big）
+// 模块定义 - 首屏为 AUDIO-VISUAL（展示 Studio Logo）
 const MODULES = [
+  { id: 'audiovisual', name: 'STUDIO', label: 'STUDIO LOGO' },
   { id: 'grid', name: 'GRID', label: 'GRID MODULE' },
   { id: 'bigtypo', name: 'BIG', label: 'BIG' },
   { id: 'scroll', name: 'SCROLL', label: 'SCROLL TEST' },
   { id: 'rain', name: 'RAIN', label: 'RAIN TEST' },
-  { id: 'audiovisual', name: 'AUDIO-VISUAL', label: 'AUDIO-VISUAL STUDIO' },
 ]
 
 const AUTO_CYCLE_INTERVAL = 20000 // 20秒
 
 function App() {
   const { settings, loading } = useSettings()
-  const [activeModule, setActiveModule] = useState('grid')
+  const [activeModule, setActiveModule] = useState('audiovisual')
   const [isNavVisible, setIsNavVisible] = useState(false)
   const [isTransitioning, setIsTransitioning] = useState(false)
   const [isAutoPlay, setIsAutoPlay] = useState(true) // 自动轮播开关（如 P 键）
@@ -95,27 +95,51 @@ function App() {
       setShowHoldGlow(true)
       setIsPaused((p) => !p)
     }
-    const onPointerDown = (e) => {
+    
+    // 区分点击与长按：记录 touch 开始位置
+    const touchStartPosRef = { x: 0, y: 0 }
+    
+    const onPointerUp = (e) => {
+      // 如果移动距离过大，不触发长按（区分滑动与长按）
+      if (e?.type === 'touchend') {
+        const moved = Math.abs(touchStartPosRef.x) > 10 || Math.abs(touchStartPosRef.y) > 10
+        if (moved) {
+          clearHoldTimer()
+          return
+        }
+      }
+      clearHoldTimer()
+    }
+    
+    const handlePointerDown = (e) => {
+      // 记录 touch 开始位置
+      if (e?.type === 'touchstart') {
+        touchStartPosRef.x = e.touches?.[0]?.clientX ?? 0
+        touchStartPosRef.y = e.touches?.[0]?.clientY ?? 0
+        return
+      }
       clearHoldTimer()
       holdTimerRef.current = setTimeout(onHold, HOLD_MS)
     }
-    const onPointerUp = () => {
-      clearHoldTimer()
-    }
+    
     const root = document.getElementById('app-root')
     if (!root) return
-    root.addEventListener('touchstart', onPointerDown, { passive: true })
+    
+    root.addEventListener('touchstart', handlePointerDown, { passive: true })
     root.addEventListener('touchend', onPointerUp, { passive: true })
     root.addEventListener('touchcancel', onPointerUp, { passive: true })
-    root.addEventListener('mousedown', onPointerDown)
+    root.addEventListener('mousedown', handlePointerDown)
     window.addEventListener('mouseup', onPointerUp)
     window.addEventListener('mouseleave', onPointerUp)
+    
     return () => {
       clearHoldTimer()
-      root.removeEventListener('touchstart', onPointerDown)
-      root.removeEventListener('touchend', onPointerUp)
-      root.removeEventListener('touchcancel', onPointerUp)
-      root.removeEventListener('mousedown', onPointerDown)
+      if (root) {
+        root.removeEventListener('touchstart', handlePointerDown)
+        root.removeEventListener('touchend', onPointerUp)
+        root.removeEventListener('touchcancel', onPointerUp)
+      }
+      root.removeEventListener('mousedown', handlePointerDown)
       window.removeEventListener('mouseup', onPointerUp)
       window.removeEventListener('mouseleave', onPointerUp)
     }
