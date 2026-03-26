@@ -267,7 +267,9 @@ function App() {
       </AnimatePresence>
 
       {/* 性能监视器：仅在 RAIN / Audio-visual 模式显示，用于观察高刷屏表现 */}
-      {(activeModule === 'rain' || activeModule === 'audiovisual') && <PerformanceMonitor />}
+      {(activeModule === 'rain' || activeModule === 'audiovisual' || activeModule === 'photon') && (
+        <PerformanceMonitor />
+      )}
 
       {/* 底部导航栏 - 隐藏式，顶边波浪形裁剪 + 水波纹按钮 */}
       <svg width="0" height="0" aria-hidden="true">

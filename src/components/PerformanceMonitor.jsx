@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 
 /**
  * 全局性能监视器：实时显示 FPS 与 Frame Time（注释小字、灰色）。
- * 用于在 RAIN / Audio-visual 模式下观察高刷屏上的动画表现。
+ * 用于在 RAIN / Audio-visual / PHOTON 模式下观察高刷屏上的动画表现。
  */
 export function PerformanceMonitor() {
   const [fps, setFps] = useState(0)

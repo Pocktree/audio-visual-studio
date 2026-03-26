@@ -12,7 +12,6 @@ const SIZE_MIN = 2
 const SIZE_MAX = 15
 const DENSITY_MIN = 0
 const DENSITY_MAX = 5000
-const MAP_ALPHA = 0.05
 // 扩散达到「最大」后才开始淡出；淡出时长随机，单位 ms
 const FADE_MS_MIN = 700
 const FADE_MS_MAX = 2400
@@ -20,15 +19,6 @@ const FADE_MS_MAX = 2400
 const MAX_SPREAD_T = 0.987
 /** 尺寸随 t 的缓动：指数越大，初期相对「变大」越快（ease-out） */
 const SPREAD_EASE_POWER = 3.2
-
-function luminanceAt(data, w, h, ix, iy) {
-  if (!data || ix < 0 || iy < 0 || ix >= w || iy >= h) return 0.5
-  const i = (iy * w + ix) * 4
-  const r = data[i] / 255
-  const g = data[i + 1] / 255
-  const b = data[i + 2] / 255
-  return 0.299 * r + 0.587 * g + 0.114 * b
-}
 
 function initParticles(count, cw, ch) {
   const list = []
@@ -58,9 +48,6 @@ export function PhotonModule() {
   const particlesRef = useRef([])
   const rafRef = useRef(null)
   const lastTRef = useRef(null)
-  const imgDataRef = useRef(null)
-  const imgDimsRef = useRef({ w: 0, h: 0 })
-  const mapImgRef = useRef(null)
   const panelRef = useRef(null)
 
   const [hue, setHue] = useState(0)
@@ -69,8 +56,6 @@ export function PhotonModule() {
   const [blurIntensity, setBlurIntensity] = useState(0.38)
   const [flowVelocity, setFlowVelocity] = useState(12)
   const [density, setDensity] = useState(3000)
-  const [mapFileName, setMapFileName] = useState('—')
-  const [thumbUrl, setThumbUrl] = useState(null)
   const [showControls, setShowControls] = useState(false)
   const [hudFps, setHudFps] = useState(0)
 
@@ -127,30 +112,6 @@ export function PhotonModule() {
   useEffect(() => {
     resizeAndReset()
   }, [density, resizeAndReset])
-
-  const onFile = (e) => {
-    const file = e.target.files?.[0]
-    if (!file || !file.type.startsWith('image/')) return
-    setMapFileName(file.name)
-    const url = URL.createObjectURL(file)
-    setThumbUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev)
-      return url
-    })
-    const im = new Image()
-    im.crossOrigin = 'anonymous'
-    im.onload = () => {
-      mapImgRef.current = im
-      const oc = document.createElement('canvas')
-      oc.width = im.naturalWidth
-      oc.height = im.naturalHeight
-      const octx = oc.getContext('2d', { willReadFrequently: true })
-      octx.drawImage(im, 0, 0)
-      imgDataRef.current = octx.getImageData(0, 0, oc.width, oc.height).data
-      imgDimsRef.current = { w: oc.width, h: oc.height }
-    }
-    im.src = url
-  }
 
   useEffect(() => {
     const threshold = 150
@@ -219,16 +180,6 @@ export function PhotonModule() {
       ctx.fillStyle = BG
       ctx.fillRect(0, 0, w, h)
 
-      const mapIm = mapImgRef.current
-      const data = imgDataRef.current
-      const { w: iw, h: ih } = imgDimsRef.current
-      if (mapIm && iw > 0) {
-        ctx.save()
-        ctx.globalAlpha = MAP_ALPHA
-        ctx.drawImage(mapIm, 0, 0, w, h)
-        ctx.restore()
-      }
-
       const H = hueRef.current
       const Lb = lightnessRef.current
       const Ta = transparencyRef.current
@@ -291,15 +242,8 @@ export function PhotonModule() {
         const easedT = 1 - Math.pow(1 - t, SPREAD_EASE_POWER)
         let baseSize = SIZE_MIN + easedT * (SIZE_MAX - SIZE_MIN)
 
-        let lum = 0.5
-        if (data && iw > 0) {
-          const ix = Math.floor((p.x / w) * iw)
-          const iy = Math.floor((p.y / h) * ih)
-          lum = luminanceAt(data, iw, ih, ix, iy)
-        }
-
-        const sizeMul = 0.55 + 0.9 * lum
-        const alphaBright = 0.35 + 0.5 * (1 - lum)
+        const sizeMul = 1
+        const alphaBright = 0.6
         const opacityFade =
           p.phase === 'fading'
             ? Math.max(0, (p.fadeLeft || 0) / (p.fadeTotal || 1))
@@ -311,7 +255,7 @@ export function PhotonModule() {
         const radius = radiusCore * outerScale
         const outer = radius * glowSpread
 
-        const lightMul = Math.min(100, Lb + (100 - Lb) * 0.35 * lum)
+        const lightMul = Math.min(100, Lb + (100 - Lb) * 0.175)
         const coreL = Math.max(0, Math.min(100, lightMul - 8))
         const darkL = Math.max(0, Math.min(100, lightMul - 16))
         const rimL = Math.min(100, lightMul + 10)
@@ -367,22 +311,6 @@ export function PhotonModule() {
           color: textColorPanel,
         }}
       >
-        <label
-          className="block w-full cursor-pointer rounded-md border py-1 pl-2 pr-2 text-left text-[10px] font-ui transition-colors hover:bg-white/5"
-          style={{ borderColor: btnBorder, color: textColorPanel }}
-        >
-          <span className="block truncate">map: upload</span>
-          <input type="file" accept="image/*" className="hidden" onChange={onFile} />
-        </label>
-        {thumbUrl && (
-          <img
-            src={thumbUrl}
-            alt=""
-            className="h-auto max-h-24 w-full rounded-sm object-contain"
-            style={{ border: `1px solid ${panelBorder}` }}
-          />
-        )}
-
         <div>
           <label className="mb-1 block text-[10px] font-ui" style={{ color: textColorPanel }}>
             hue: {hue}
@@ -482,9 +410,6 @@ export function PhotonModule() {
         </div>
         <div>BASE COLOR · {hslaStr}</div>
         <div>BLUR LEVEL · {(blurIntensity * 100).toFixed(0)}%</div>
-        <div className="truncate" title={mapFileName}>
-          MAP SOURCE · {mapFileName}
-        </div>
       </div>
     </div>
   )
