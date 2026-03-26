@@ -5,6 +5,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { GlobalShortcutsHint } from './GlobalShortcutsHint'
+import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
 
 const BG = '#000000'
 const SAT_LOCK = 100
@@ -19,6 +20,17 @@ const FADE_MS_MAX = 2400
 const MAX_SPREAD_T = 0.987
 /** 尺寸随 t 的缓动：指数越大，初期相对「变大」越快（ease-out） */
 const SPREAD_EASE_POWER = 3.2
+
+function detectPhotonRenderTrack() {
+  // 严格区分：Blink(Chrome/Edge) vs WebKit(Safari)。
+  // 其它浏览器暂时复用 Blink 渲染（保持视觉一致 + 避免引入额外风险）。
+  if (typeof navigator === 'undefined') return 'blink'
+  const ua = navigator.userAgent || ''
+  const isSafari = /Safari/.test(ua)
+  const hasBlinkToken = /Chrome|Chromium|CriOS|Edg|OPR/.test(ua)
+  if (isSafari && !hasBlinkToken) return 'webkit'
+  return 'blink'
+}
 
 function initParticles(count, cw, ch) {
   const list = []
@@ -49,6 +61,7 @@ export function PhotonModule() {
   const rafRef = useRef(null)
   const lastTRef = useRef(null)
   const panelRef = useRef(null)
+  const [renderTrack] = useState(() => detectPhotonRenderTrack())
 
   const [hue, setHue] = useState(0)
   const [lightness, setLightness] = useState(55)
@@ -152,7 +165,71 @@ export function PhotonModule() {
     let frame = 0
     let lastHud = performance.now()
 
-    const tick = (now) => {
+    const track = renderTrack
+
+    // Safari/WebKit：避免逐粒子 `createRadialGradient`（GC + CPU 压力大，易掉帧）
+    // -> 用“离散 easedT 尺寸”的预渲染粒子精灵（Sprite）进行 drawImage。
+    const SPRITE_BINS = 24
+    const MIN_SPRITE_RADIUS = 2
+    let spriteCacheKey = null
+    let spriteCanvases = []
+    let spriteRadii = []
+
+    const buildWebKitSpriteCache = ({ H, Lb, glowSpread }) => {
+      const lightMul = Math.min(100, Lb + (100 - Lb) * 0.175)
+      const coreL = Math.max(0, Math.min(100, lightMul - 8))
+      const darkL = Math.max(0, Math.min(100, lightMul - 16))
+      const rimL = Math.min(100, lightMul + 10)
+
+      const nextCanvases = new Array(SPRITE_BINS)
+      const nextRadii = new Array(SPRITE_BINS)
+
+      for (let i = 0; i < SPRITE_BINS; i++) {
+        const easedT = SPRITE_BINS <= 1 ? 0 : i / (SPRITE_BINS - 1)
+        const baseSize = SIZE_MIN + easedT * (SIZE_MAX - SIZE_MIN)
+        const radiusCore = Math.max(0.5, baseSize * 0.48)
+        const outerScale = 1 + 4 * easedT
+        const outer = radiusCore * outerScale * glowSpread
+
+        const radiusInt = Math.max(MIN_SPRITE_RADIUS, Math.ceil(outer))
+        const dim = radiusInt * 2
+
+        const off = document.createElement('canvas')
+        off.width = dim
+        off.height = dim
+        const offCtx = off.getContext('2d', { alpha: true, desynchronized: true })
+
+        if (!offCtx) {
+          nextCanvases[i] = off
+          nextRadii[i] = radiusInt
+          continue
+        }
+
+        const cx = radiusInt
+        const cy = radiusInt
+        const g = offCtx.createRadialGradient(cx, cy, 0, cx, cy, radiusInt)
+        g.addColorStop(0, `hsla(${H}, ${SAT_LOCK}%, ${coreL}%, 0.88)`)
+        g.addColorStop(0.38, `hsla(${H}, ${SAT_LOCK}%, ${darkL}%, 0.72)`)
+        g.addColorStop(0.68, `hsla(${H}, ${SAT_LOCK}%, ${lightMul}%, 0.42)`)
+        g.addColorStop(0.9, `hsla(${H}, ${SAT_LOCK}%, ${rimL}%, 0.92)`)
+        g.addColorStop(1, `hsla(${H}, ${SAT_LOCK}%, ${rimL}%, 0)`)
+
+        offCtx.clearRect(0, 0, dim, dim)
+        offCtx.fillStyle = g
+        offCtx.beginPath()
+        offCtx.arc(cx, cy, radiusInt, 0, Math.PI * 2)
+        offCtx.fill()
+
+        nextCanvases[i] = off
+        nextRadii[i] = radiusInt
+      }
+
+      spriteCacheKey = `${H}|${Lb}|${Math.round(glowSpread * 1000) / 1000}`
+      spriteCanvases = nextCanvases
+      spriteRadii = nextRadii
+    }
+
+    const tickBlink = (now) => {
       frame++
       if (now - lastHud > 500) {
         const dt = (now - lastHud) / 1000
@@ -275,9 +352,132 @@ export function PhotonModule() {
 
       ctx.globalCompositeOperation = 'source-over'
 
-      rafRef.current = requestAnimationFrame(tick)
+      rafRef.current = requestAnimationFrame(tickBlink)
     }
 
+    const tickWebKit = (now) => {
+      frame++
+      if (now - lastHud > 500) {
+        const dt = (now - lastHud) / 1000
+        setHudFps(frame / dt)
+        frame = 0
+        lastHud = now
+      }
+
+      const w = window.innerWidth
+      const h = window.innerHeight
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+      const cx = w / 2
+      const cy = h / 2
+      const maxDiff = Math.hypot(w, h) * 0.5
+
+      const dt =
+        lastTRef.current != null
+          ? Math.min(0.05, (now - lastTRef.current) / 1000)
+          : 0.016
+      lastTRef.current = now
+
+      ctx.globalCompositeOperation = 'source-over'
+      ctx.fillStyle = BG
+      ctx.fillRect(0, 0, w, h)
+
+      const H = hueRef.current
+      const Lb = lightnessRef.current
+      const Ta = transparencyRef.current
+      const blurK = blurIntensityRef.current
+      const vPps = flowVelocityRef.current
+
+      const glowSpread = 1.12 + blurK * 1.85
+
+      // 仅用于 WebKit 路径：预渲染 sprite
+      const desiredKey = `${H}|${Lb}|${Math.round(glowSpread * 1000) / 1000}`
+      if (spriteCacheKey !== desiredKey || spriteCanvases.length === 0) {
+        buildWebKitSpriteCache({ H, Lb, glowSpread })
+      }
+
+      const aBase = Math.min(1, Ta * (0.4 + 0.55 * 0.6))
+
+      const parts = particlesRef.current
+      const respawnAtCenter = (p) => {
+        const ang = Math.random() * Math.PI * 2
+        p.x = cx + (Math.random() - 0.5) * 4
+        p.y = cy + (Math.random() - 0.5) * 4
+        p.spawnX = p.x
+        p.spawnY = p.y
+        p.vx = Math.cos(ang)
+        p.vy = Math.sin(ang)
+        p.spdJ = 0.75 + Math.random() * 0.5
+        p.phase = 'growing'
+        p.fadeTotal = 0
+        p.fadeLeft = 0
+      }
+      for (let i = 0; i < parts.length; i++) {
+        const p = parts[i]
+        p.x += p.vx * vPps * p.spdJ * dt
+        p.y += p.vy * vPps * p.spdJ * dt
+
+        const rawDiff =
+          Math.hypot(p.x - p.spawnX, p.y - p.spawnY) / (maxDiff || 1)
+        const spreadT = Math.max(0, Math.min(1, rawDiff))
+
+        if (p.phase === 'growing' || !p.phase) {
+          if (spreadT >= MAX_SPREAD_T) {
+            p.phase = 'fading'
+            const fd = FADE_MS_MIN + Math.random() * (FADE_MS_MAX - FADE_MS_MIN)
+            p.fadeTotal = fd
+            p.fadeLeft = fd
+          }
+        } else if (p.phase === 'fading') {
+          p.fadeLeft -= dt * 1000
+          if (p.fadeLeft <= 0) {
+            respawnAtCenter(p)
+            continue
+          }
+        }
+
+        if (p.x < -32 || p.x > w + 32 || p.y < -32 || p.y > h + 32) {
+          respawnAtCenter(p)
+        }
+      }
+
+      ctx.globalCompositeOperation = 'lighter'
+      ctx.globalAlpha = 1
+
+      for (let i = 0; i < parts.length; i++) {
+        const p = parts[i]
+        const diff =
+          Math.hypot(p.x - p.spawnX, p.y - p.spawnY) / (maxDiff || 1)
+        // 扩散距离增长采用 ease-out：先快后慢（d 越小增长越快，d 越大越接近上限）
+        const t = Math.max(0, Math.min(1, diff))
+        const easedT = 1 - Math.pow(1 - t, SPREAD_EASE_POWER)
+
+        const opacityFade =
+          p.phase === 'fading'
+            ? Math.max(0, (p.fadeLeft || 0) / (p.fadeTotal || 1))
+            : 1
+        if (opacityFade <= 0) continue
+
+        const alpha = aBase * opacityFade
+        if (alpha <= 0) continue
+
+        const idx =
+          SPRITE_BINS <= 1 ? 0 : Math.max(0, Math.min(SPRITE_BINS - 1, Math.round(easedT * (SPRITE_BINS - 1))))
+        const sprite = spriteCanvases[idx]
+        const r = spriteRadii[idx]
+
+        ctx.globalAlpha = alpha
+        ctx.drawImage(sprite, p.x - r, p.y - r)
+      }
+
+      ctx.globalAlpha = 1
+      ctx.globalCompositeOperation = 'source-over'
+
+      rafRef.current = requestAnimationFrame(tickWebKit)
+    }
+
+    const tick = track === 'webkit' ? tickWebKit : tickBlink
     rafRef.current = requestAnimationFrame(tick)
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
@@ -299,6 +499,18 @@ export function PhotonModule() {
         className="absolute inset-0 block h-full w-full"
         style={{ display: 'block' }}
       />
+
+      {/* 左上角小 Logo（与 rain 同款 SVG）：黑色 */}
+      <div
+        className="absolute top-4 left-4 z-30 w-24 h-auto pointer-events-none"
+        aria-hidden
+      >
+        <svg viewBox={STUDIO_LOGO_VIEWBOX} className="w-full h-auto">
+          {STUDIO_LOGO_PATHS.map((d, i) => (
+            <path key={i} fill="rgba(140,140,140,0.85)" d={d} />
+          ))}
+        </svg>
+      </div>
 
       <div
         ref={panelRef}

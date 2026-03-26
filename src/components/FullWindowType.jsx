@@ -1,7 +1,18 @@
 import { useState, useEffect, useRef, useLayoutEffect, useCallback } from 'react'
 import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 
-const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+const DISPLAY_TEXT = 'AUDIO-VISUALSTUDIO'
+const DISPLAY_CHARS = DISPLAY_TEXT.split('')
+
+function detectBigEngineTrack() {
+  // 严格区分：Blink(Chrome/Edge) vs WebKit(Safari)。
+  if (typeof navigator === 'undefined') return 'blink'
+  const ua = navigator.userAgent || ''
+  const isSafari = /Safari/.test(ua)
+  const hasBlinkToken = /Chrome|Chromium|CriOS|Edg|OPR/.test(ua)
+  if (isSafari && !hasBlinkToken) return 'webkit'
+  return 'blink'
+}
 
 // 波浪参数：baseFrequency 可调，初始 0.02；numOctaves 固定 1
 const FREQ_STEP = 0.001
@@ -13,39 +24,45 @@ const AMP_MAX = 80
 
 /** 全屏硬核贴边版 - 动态 BBox 计算 + 终极贴边 */
 export function FullWindowType() {
-  const [letter, setLetter] = useState(() => LETTERS[Math.floor(Math.random() * LETTERS.length)])
+  // Big：按顺序逐字符显示 DISPLAY_TEXT
+  const [charIndex, setCharIndex] = useState(0)
   const [intervalMs, setIntervalMs] = useState(800)
   const [inverted, setInverted] = useState(false)
   const [outlineMode, setOutlineMode] = useState(false)
   const [fontWeight, setFontWeight] = useState(700)
+  const [lettersVisible, setLettersVisible] = useState(true)
   const [showControls, setShowControls] = useState(false)
   const [showOverscanRuler, setShowOverscanRuler] = useState(true) // 几何畸变与边框校准标尺，默认显示
   const [viewport, setViewport] = useState(() => ({ w: typeof window !== 'undefined' ? window.innerWidth : 1920, h: typeof window !== 'undefined' ? window.innerHeight : 1080 }))
   
   // Wave 参数
   const [waveEnabled, setWaveEnabled] = useState(true)
-  const [waveFrequency, setWaveFrequency] = useState(0.02)  // baseFrequency 初始 0.02
-  const [waveAmplitude, setWaveAmplitude] = useState(40)
-  const [waveSpeed, setWaveSpeed] = useState(120)  // 周期(秒)，速度 = 1/waveSpeed，用 delta time 一致
+  const [waveFrequency, setWaveFrequency] = useState(0.05) // baseFrequency 默认 0.05
+  const [waveAmplitude, setWaveAmplitude] = useState(14)
+  const [waveSpeed, setWaveSpeed] = useState(300) // 周期(秒)
   
   const [outlineWidth, setOutlineWidth] = useState(2)
   const [viewBox, setViewBox] = useState('0 0 100 100')
   const [debugBounds, setDebugBounds] = useState(false)
   const [lastBbox, setLastBbox] = useState(null)
   const textRef = useRef(null)
+  // Safari: 测量时需要“未经过滤镜的几何”，避免 getBBox 因波浪 filter 产生抖动。
+  const measureTextRef = useRef(null)
   const containerRef = useRef(null)
   const panelRef = useRef(null)
   const turbulenceRef = useRef(null)
   const waveTimeRef = useRef(0)
   const lastFrameRef = useRef(null)
+  const lastViewBoxRef = useRef(null)
+  const [engineTrack] = useState(() => detectBigEngineTrack())
 
   // 方案 B：暴力溢出裁切 — 缩小取景框，把字体内部留白推到屏外，窄/宽/超宽屏统一触边
   const CROP_Y_OFFSET = 0.14   // viewBox y 下移 14%
   const CROP_HEIGHT = 0.70    // height 取 70%（上下继续裁切撑满）
-  const CROP_X = 0.06         // 左右各裁 6%（负 margin 效果）
-  const MIN_VIEWBOX_SIZE = 30 // 最小 viewBox 尺寸，防止宽屏下字体消失
+  const CROP_X = 0            // 不裁切水平方向，拉伸到最大
+  const MIN_VIEWBOX_SIZE_VH = 30 // vh 最小尺寸限制
   const updateViewBoxFromBBox = useCallback(() => {
-    const el = textRef.current
+    const el = engineTrack === 'webkit' ? measureTextRef.current : textRef.current
     if (!el || typeof el.getBBox !== 'function') return
     const bbox = el.getBBox()
     if (bbox.width <= 0 || bbox.height <= 0) return
@@ -57,21 +74,23 @@ export function FullWindowType() {
     let vx = bbox.x + bbox.width * CROP_X
     let vw = bbox.width * (1 - 2 * CROP_X)
 
-    // 添加最小尺寸限制，防止宽屏下字体过小或消失
-    if (vw < MIN_VIEWBOX_SIZE) {
-      vx = bbox.x - (MIN_VIEWBOX_SIZE - vw) / 2
-      vw = MIN_VIEWBOX_SIZE
-    }
-    if (vh < MIN_VIEWBOX_SIZE) {
-      vy = bbox.y - (MIN_VIEWBOX_SIZE - vh) / 2
-      vh = MIN_VIEWBOX_SIZE
-    }
-
     if (vw <= 0 || vh <= 0) return
 
     // preserveAspectRatio="none"：viewBox 水平方向铺满整窗，字形在屏幕上的宽度 = 窗口宽度
-    setViewBox(`${vx} ${vy} ${vw} ${vh}`)
-  }, [])
+    let next = `${vx} ${vy} ${vw} ${vh}`
+    if (engineTrack === 'webkit') {
+      // Safari 宽屏抖动通常来自 sub-pixel 与 filter 几何差异；量化能显著降低闪动。
+      const q = (n) => Math.round(n * 100) / 100
+      vx = q(vx)
+      vy = q(vy)
+      vw = q(vw)
+      vh = q(vh)
+      next = `${vx} ${vy} ${vw} ${vh}`
+      if (lastViewBoxRef.current === next) return
+      lastViewBoxRef.current = next
+    }
+    setViewBox(next)
+  }, [engineTrack])
 
   // 字体就绪后再算一次 bbox，避免首帧 getBBox 为 0 或错误
   useEffect(() => {
@@ -112,15 +131,30 @@ export function FullWindowType() {
   }, [])
 
   // 字母/字重变化时重新计算
+  const letter = DISPLAY_CHARS[charIndex] || ''
+
   useEffect(() => {
+    if (engineTrack === 'webkit') {
+      let cancelled = false
+      requestAnimationFrame(() => {
+        if (cancelled) return
+        requestAnimationFrame(() => {
+          if (cancelled) return
+          updateViewBoxFromBBox()
+        })
+      })
+      return () => {
+        cancelled = true
+      }
+    }
     const timer = setTimeout(updateViewBoxFromBBox, 50)
     return () => clearTimeout(timer)
-  }, [letter, fontWeight, outlineMode, updateViewBoxFromBBox])
+  }, [letter, fontWeight, outlineMode, updateViewBoxFromBBox, engineTrack])
 
-  // 随机字母轮播
+  // 按顺序字符轮播
   useEffect(() => {
     const t = setInterval(() => {
-      setLetter(LETTERS[Math.floor(Math.random() * LETTERS.length)])
+      setCharIndex((idx) => (idx + 1) % DISPLAY_CHARS.length)
     }, intervalMs)
     return () => clearInterval(t)
   }, [intervalMs])
@@ -256,7 +290,27 @@ export function FullWindowType() {
             />
           </filter>
         </defs>
-        
+
+        {/* Safari measurement: 不经过波浪 filter，避免 getBBox 在不同帧上几何抖动 */}
+        <text
+          ref={measureTextRef}
+          x="50"
+          y="50"
+          textAnchor="middle"
+          dominantBaseline="central"
+          fontSize="100"
+          fontFamily="'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans CN', 'Heiti SC', Inter, 'Archivo Black', system-ui, sans-serif"
+          fontWeight={fontWeight}
+          fill={outlineMode ? 'none' : textColor}
+          stroke={outlineMode ? textColor : waveEnabled ? textColor : 'none'}
+          strokeWidth={outlineMode ? outlineWidth / 8 : waveEnabled ? 0.4 : 0}
+          paintOrder="stroke fill"
+          // 不用 opacity: 0，Safari 里可能导致元素不参与 bbox 测量，从而 viewBox 计算异常。
+          style={{ opacity: 0.001, pointerEvents: 'none', textRendering: 'geometricPrecision' }}
+        >
+          {letter}
+        </text>
+
         <g
           filter="url(#waveDistortion)"
           style={{
@@ -291,6 +345,7 @@ export function FullWindowType() {
               paintOrder="stroke fill"
               style={{
                 textRendering: 'geometricPrecision',
+              opacity: lettersVisible ? 1 : 0,
               }}
             >
               {letter}
@@ -567,6 +622,18 @@ export function FullWindowType() {
           }}
         >
           outline: {outlineMode ? 'on' : 'off'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setLettersVisible((v) => !v)}
+          className="text-[10px] font-ui py-1 px-2 border rounded-md w-full text-left"
+          style={{
+            borderColor: btnBorder,
+            color: lettersVisible ? btnActive : textColorPanel,
+            background: lettersVisible ? 'rgba(255,255,255,0.1)' : 'transparent',
+          }}
+        >
+          letters: {lettersVisible ? 'on' : 'off'}
         </button>
         <button
           type="button"
