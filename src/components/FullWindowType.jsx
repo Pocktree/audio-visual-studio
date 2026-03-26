@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useLayoutEffect, useCallback } from 'react'
+import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
@@ -49,13 +50,13 @@ export function FullWindowType() {
     const bbox = el.getBBox()
     if (bbox.width <= 0 || bbox.height <= 0) return
     setLastBbox(bbox)
-    
+
     // 计算原始 viewBox
     let vy = bbox.y + bbox.height * CROP_Y_OFFSET
     let vh = bbox.height * CROP_HEIGHT
     let vx = bbox.x + bbox.width * CROP_X
     let vw = bbox.width * (1 - 2 * CROP_X)
-    
+
     // 添加最小尺寸限制，防止宽屏下字体过小或消失
     if (vw < MIN_VIEWBOX_SIZE) {
       vx = bbox.x - (MIN_VIEWBOX_SIZE - vw) / 2
@@ -65,10 +66,24 @@ export function FullWindowType() {
       vy = bbox.y - (MIN_VIEWBOX_SIZE - vh) / 2
       vh = MIN_VIEWBOX_SIZE
     }
-    
+
     if (vw <= 0 || vh <= 0) return
+
+    // preserveAspectRatio="none"：viewBox 水平方向铺满整窗，字形在屏幕上的宽度 = 窗口宽度
     setViewBox(`${vx} ${vy} ${vw} ${vh}`)
   }, [])
+
+  // 字体就绪后再算一次 bbox，避免首帧 getBBox 为 0 或错误
+  useEffect(() => {
+    if (typeof document === 'undefined' || !document.fonts?.ready) return
+    let cancelled = false
+    document.fonts.ready.then(() => {
+      if (!cancelled) requestAnimationFrame(() => updateViewBoxFromBBox())
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [updateViewBoxFromBBox])
 
   // 初始化 + resize 监听
   useLayoutEffect(() => {
@@ -581,6 +596,8 @@ export function FullWindowType() {
         <div className="text-[9px] font-ui mt-1 opacity-80" style={{ color: textColorPanel }}>
           7/8 amp · 9/0 freq
         </div>
+
+        <GlobalShortcutsHint color="rgba(255,255,255,0.45)" />
       </div>
     </div>
   )

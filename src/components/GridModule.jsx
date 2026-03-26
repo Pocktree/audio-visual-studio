@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { RippleButton } from './RippleButton'
+import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
 
 // Display-P3 广色域
@@ -1033,6 +1034,8 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
         >
           Bit-Depth: {gridTestMode === 'bitdepth' ? 'on' : 'off'}
         </RippleButton>
+
+        <GlobalShortcutsHint color="rgba(255,255,255,0.45)" />
       </div>
     </div>
   )

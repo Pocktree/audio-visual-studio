@@ -8,8 +8,10 @@ import { IndustrialTypoModule } from './components/IndustrialTypoModule'
 import { GridModule } from './components/GridModule'
 import { ScrollTestModule } from './components/ScrollTestModule'
 import { RainTestModule } from './components/RainTestModule'
+import { PhotonModule } from './components/PhotonModule'
 import { PerformanceMonitor } from './components/PerformanceMonitor'
 import { RippleButton } from './components/RippleButton'
+import { AVS_KEYCAP_EVENTS } from './components/GlobalShortcutsHint'
 import './App.css'
 
 // 模块定义 - 首屏为 AUDIO-VISUAL（展示 Studio Logo）
@@ -19,6 +21,7 @@ const MODULES = [
   { id: 'bigtypo', name: 'BIG', label: 'BIG' },
   { id: 'scroll', name: 'SCROLL', label: 'SCROLL TEST' },
   { id: 'rain', name: 'RAIN', label: 'RAIN TEST' },
+  { id: 'photon', name: 'PHOTON', label: 'PHOTON' },
 ]
 
 const AUTO_CYCLE_INTERVAL = 20000 // 20秒
@@ -57,7 +60,7 @@ function App() {
     })
   }, [activeModule, isTransitioning])
 
-  // 导航栏仅当鼠标靠近底部时出现；点击/空格切换模式不会唤出导航
+  // 导航栏仅当鼠标靠近底部时出现
   const NAV_THRESHOLD = 100 // 距离底部 100px 内视为「靠近」
   useEffect(() => {
     const handleMouseMove = (e) => {
@@ -163,7 +166,19 @@ function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [activeModule, switchModule])
+  }, [activeModule, switchModule, toggleFullscreen])
+
+  // 控制面板键帽点击：与 F / P 键盘一致
+  useEffect(() => {
+    const onFs = () => toggleFullscreen()
+    const onP = () => setIsAutoPlay((prev) => !prev)
+    window.addEventListener(AVS_KEYCAP_EVENTS.fullscreen, onFs)
+    window.addEventListener(AVS_KEYCAP_EVENTS.carousel, onP)
+    return () => {
+      window.removeEventListener(AVS_KEYCAP_EVENTS.fullscreen, onFs)
+      window.removeEventListener(AVS_KEYCAP_EVENTS.carousel, onP)
+    }
+  }, [toggleFullscreen])
 
   // 从 settings 应用主题
   useEffect(() => {
@@ -209,6 +224,8 @@ function App() {
         return <ScrollTestModule fontFamily={fontFamily} />
       case 'rain':
         return <RainTestModule />
+      case 'photon':
+        return <PhotonModule />
       case 'audiovisual':
         return <IndustrialTypoModule fontFamily={fontFamily} />
       default:

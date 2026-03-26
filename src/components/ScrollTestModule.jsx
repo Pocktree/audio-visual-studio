@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
+import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 
 const WIDE_GAMUT = {
   white: 'color(display-p3 1 1 1)',
@@ -886,6 +887,8 @@ export function ScrollTestModule() {
         >
           pursuit mode: {pursuitMode ? 'on' : 'off'}
         </button>
+
+        <GlobalShortcutsHint color="rgba(255,255,255,0.45)" />
       </div>
 
       <style>{`

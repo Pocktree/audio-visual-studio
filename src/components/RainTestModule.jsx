@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { RippleButton } from './RippleButton'
+import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
 
 const WIDE_GAMUT = {
@@ -408,6 +409,8 @@ export function RainTestModule() {
         >
           water: {colorScheme === 'water' ? 'on' : 'off'}
         </RippleButton>
+
+        <GlobalShortcutsHint color={isLightMode ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)'} />
       </div>
       <style>{`
         .rain-panel-light input[type="range"]::-webkit-slider-thumb {

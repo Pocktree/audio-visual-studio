@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { FluidShaderCanvas } from './FluidShader'
+import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 
 const WIDE_GAMUT = {
   red: 'color(display-p3 1 0 0)',
@@ -297,6 +298,7 @@ export function IndustrialTypoModule({ fontFamily }) {
       <div className="absolute bottom-[52%] left-4 font-mono z-[30]" style={labelStyle}>
         <div title="运行时间 Run time (s)">T · Time: {liveTime.toFixed(2)} s</div>
         <div title="下半区顶部靠近唤出 SMPTE/GRAY/FLUID">Color: hover top to show</div>
+        <GlobalShortcutsHint variant="inline" color="rgba(140,140,140,0.9)" />
       </div>
 
       {/* 右下角 - 色彩模式（灰色注释） */}
