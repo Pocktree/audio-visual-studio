@@ -2,6 +2,7 @@
  * PHOTON：Canvas 2D 全屏粒子。
  * getContext('2d', { alpha: false, desynchronized: true }) — 不透明背景、降低合成开销；
  * 胧胧光感用径向渐变 + globalCompositeOperation 'lighter'（对数千粒子逐帧 shadowBlur 会极卡）。
+ * 粒子：呼吸/闪烁调制；部分为锐利高亮光子（十字眩光 + 亮核）。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { GlobalShortcutsHint } from './GlobalShortcutsHint'
@@ -32,8 +33,9 @@ function detectPhotonRenderTrack() {
   return 'blink'
 }
 
-function initParticles(count, cw, ch) {
+function initParticles(count, cw, ch, sharpRatio) {
   const list = []
+  const sr = Math.max(0, Math.min(1, sharpRatio))
   for (let n = 0; n < count; n++) {
     const x = Math.random() * cw
     const y = Math.random() * ch
@@ -50,6 +52,9 @@ function initParticles(count, cw, ch) {
       phase: 'growing',
       fadeTotal: 0,
       fadeLeft: 0,
+      breathPhase: Math.random() * Math.PI * 2,
+      flickerPhase: Math.random() * Math.PI * 2,
+      isSharpPhoton: Math.random() < sr,
     })
   }
   return list
@@ -64,11 +69,16 @@ export function PhotonModule() {
   const [renderTrack] = useState(() => detectPhotonRenderTrack())
 
   const [hue, setHue] = useState(0)
-  const [lightness, setLightness] = useState(55)
-  const [transparency, setTransparency] = useState(0.08)
-  const [blurIntensity, setBlurIntensity] = useState(0.38)
-  const [flowVelocity, setFlowVelocity] = useState(12)
+  const [lightness, setLightness] = useState(42)
+  const [transparency, setTransparency] = useState(0.09)
+  const [blurIntensity, setBlurIntensity] = useState(0.26)
+  const [flowVelocity, setFlowVelocity] = useState(21)
   const [density, setDensity] = useState(3000)
+  const [breathIntensity, setBreathIntensity] = useState(0.89)
+  const [breathHz, setBreathHz] = useState(0.49)
+  const [flickerIntensity, setFlickerIntensity] = useState(0.18)
+  const [sharpPhotonRatio, setSharpPhotonRatio] = useState(0.35)
+  const [sharpPhotonBoost, setSharpPhotonBoost] = useState(1.15)
   const [showControls, setShowControls] = useState(false)
   const [hudFps, setHudFps] = useState(0)
 
@@ -78,6 +88,11 @@ export function PhotonModule() {
   const blurIntensityRef = useRef(blurIntensity)
   const flowVelocityRef = useRef(flowVelocity)
   const densityRef = useRef(density)
+  const breathIntensityRef = useRef(breathIntensity)
+  const breathHzRef = useRef(breathHz)
+  const flickerIntensityRef = useRef(flickerIntensity)
+  const sharpPhotonRatioRef = useRef(sharpPhotonRatio)
+  const sharpPhotonBoostRef = useRef(sharpPhotonBoost)
 
   hueRef.current = hue
   lightnessRef.current = lightness
@@ -85,6 +100,11 @@ export function PhotonModule() {
   blurIntensityRef.current = blurIntensity
   flowVelocityRef.current = flowVelocity
   densityRef.current = density
+  breathIntensityRef.current = breathIntensity
+  breathHzRef.current = breathHz
+  flickerIntensityRef.current = flickerIntensity
+  sharpPhotonRatioRef.current = sharpPhotonRatio
+  sharpPhotonBoostRef.current = sharpPhotonBoost
 
   const resizeAndReset = useCallback(() => {
     const c = canvasRef.current
@@ -112,7 +132,7 @@ export function PhotonModule() {
       particlesRef.current = []
       return
     }
-    particlesRef.current = initParticles(count, w, h)
+    particlesRef.current = initParticles(count, w, h, sharpPhotonRatioRef.current)
   }, [])
 
   useEffect(() => {
@@ -124,7 +144,7 @@ export function PhotonModule() {
 
   useEffect(() => {
     resizeAndReset()
-  }, [density, resizeAndReset])
+  }, [density, sharpPhotonRatio, resizeAndReset])
 
   useEffect(() => {
     const threshold = 150
@@ -253,17 +273,24 @@ export function PhotonModule() {
           : 0.016
       lastTRef.current = now
 
-      ctx.globalCompositeOperation = 'source-over'
-      ctx.fillStyle = BG
-      ctx.fillRect(0, 0, w, h)
-
       const H = hueRef.current
       const Lb = lightnessRef.current
       const Ta = transparencyRef.current
       const blurK = blurIntensityRef.current
       const vPps = flowVelocityRef.current
+      const brI = breathIntensityRef.current
+      const brHz = breathHzRef.current
+      const fkI = flickerIntensityRef.current
+      const sharpBoost = sharpPhotonBoostRef.current
+
+      ctx.globalCompositeOperation = 'source-over'
+      ctx.fillStyle = BG
+      ctx.fillRect(0, 0, w, h)
 
       const glowSpread = 1.12 + blurK * 1.85
+
+      const tSec = now * 0.001
+      const omega = Math.PI * 2 * brHz
 
       const parts = particlesRef.current
       const respawnAtCenter = (p) => {
@@ -278,6 +305,9 @@ export function PhotonModule() {
         p.phase = 'growing'
         p.fadeTotal = 0
         p.fadeLeft = 0
+        p.breathPhase = Math.random() * Math.PI * 2
+        p.flickerPhase = Math.random() * Math.PI * 2
+        p.isSharpPhoton = Math.random() < sharpPhotonRatioRef.current
       }
       for (let i = 0; i < parts.length; i++) {
         const p = parts[i]
@@ -326,11 +356,52 @@ export function PhotonModule() {
             ? Math.max(0, (p.fadeLeft || 0) / (p.fadeTotal || 1))
             : 1
         if (opacityFade <= 0) continue
-        const a = Math.min(1, Ta * (0.4 + 0.55 * alphaBright)) * opacityFade
+
+        const breathWave =
+          1 -
+          brI +
+          brI * (0.5 + 0.5 * Math.sin(omega * tSec + (p.breathPhase || 0)))
+        const flickerWave =
+          1 -
+          fkI +
+          fkI * (0.5 + 0.5 * Math.sin(omega * 5.15 * tSec + (p.flickerPhase || 0)))
+        const pulse = Math.max(0.12, breathWave * flickerWave)
+
+        const a =
+          Math.min(1, Ta * (0.4 + 0.55 * alphaBright)) * opacityFade * pulse
         const radiusCore = Math.max(0.5, baseSize * sizeMul * 0.48)
         const outerScale = 1 + 4 * easedT
         const radius = radiusCore * outerScale
         const outer = radius * glowSpread
+
+        if (p.isSharpPhoton) {
+          const boost = Math.min(2.4, sharpBoost)
+          const ac = Math.min(1, a * 2.35 * boost)
+          const gl = radius * (1.15 + (1 - easedT) * 0.35)
+          ctx.strokeStyle = `hsla(${H}, ${SAT_LOCK}%, 96%, ${ac * 0.88})`
+          ctx.lineWidth = 0.75
+          ctx.beginPath()
+          ctx.moveTo(p.x - gl, p.y)
+          ctx.lineTo(p.x + gl, p.y)
+          ctx.moveTo(p.x, p.y - gl)
+          ctx.lineTo(p.x, p.y + gl)
+          ctx.stroke()
+          ctx.fillStyle = `hsla(${H}, ${SAT_LOCK}%, 100%, ${ac})`
+          ctx.beginPath()
+          ctx.arc(p.x, p.y, Math.max(0.65, radiusCore * 0.22), 0, Math.PI * 2)
+          ctx.fill()
+          const tight = outer * 0.42
+          const lightMulS = Math.min(100, Lb + (100 - Lb) * 0.35)
+          const gs = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, tight)
+          gs.addColorStop(0, `hsla(${H}, ${SAT_LOCK}%, ${lightMulS}%, ${ac * 0.55})`)
+          gs.addColorStop(0.55, `hsla(${H}, ${SAT_LOCK}%, ${lightMulS - 8}%, ${ac * 0.12})`)
+          gs.addColorStop(1, `hsla(${H}, ${SAT_LOCK}%, ${lightMulS}%, 0)`)
+          ctx.fillStyle = gs
+          ctx.beginPath()
+          ctx.arc(p.x, p.y, tight, 0, Math.PI * 2)
+          ctx.fill()
+          continue
+        }
 
         const lightMul = Math.min(100, Lb + (100 - Lb) * 0.175)
         const coreL = Math.max(0, Math.min(100, lightMul - 8))
@@ -379,15 +450,19 @@ export function PhotonModule() {
           : 0.016
       lastTRef.current = now
 
-      ctx.globalCompositeOperation = 'source-over'
-      ctx.fillStyle = BG
-      ctx.fillRect(0, 0, w, h)
-
       const H = hueRef.current
       const Lb = lightnessRef.current
       const Ta = transparencyRef.current
       const blurK = blurIntensityRef.current
       const vPps = flowVelocityRef.current
+      const brI = breathIntensityRef.current
+      const brHz = breathHzRef.current
+      const fkI = flickerIntensityRef.current
+      const sharpBoost = sharpPhotonBoostRef.current
+
+      ctx.globalCompositeOperation = 'source-over'
+      ctx.fillStyle = BG
+      ctx.fillRect(0, 0, w, h)
 
       const glowSpread = 1.12 + blurK * 1.85
 
@@ -398,6 +473,9 @@ export function PhotonModule() {
       }
 
       const aBase = Math.min(1, Ta * (0.4 + 0.55 * 0.6))
+
+      const tSec = now * 0.001
+      const omega = Math.PI * 2 * brHz
 
       const parts = particlesRef.current
       const respawnAtCenter = (p) => {
@@ -412,6 +490,9 @@ export function PhotonModule() {
         p.phase = 'growing'
         p.fadeTotal = 0
         p.fadeLeft = 0
+        p.breathPhase = Math.random() * Math.PI * 2
+        p.flickerPhase = Math.random() * Math.PI * 2
+        p.isSharpPhoton = Math.random() < sharpPhotonRatioRef.current
       }
       for (let i = 0; i < parts.length; i++) {
         const p = parts[i]
@@ -459,8 +540,48 @@ export function PhotonModule() {
             : 1
         if (opacityFade <= 0) continue
 
-        const alpha = aBase * opacityFade
+        const breathWave =
+          1 -
+          brI +
+          brI * (0.5 + 0.5 * Math.sin(omega * tSec + (p.breathPhase || 0)))
+        const flickerWave =
+          1 -
+          fkI +
+          fkI * (0.5 + 0.5 * Math.sin(omega * 5.15 * tSec + (p.flickerPhase || 0)))
+        const pulse = Math.max(0.12, breathWave * flickerWave)
+
+        const alpha = aBase * opacityFade * pulse
         if (alpha <= 0) continue
+
+        if (p.isSharpPhoton) {
+          const boost = Math.min(2.4, sharpBoost)
+          const ac = Math.min(1, alpha * 2.35 * boost)
+          const radiusCore = Math.max(
+            0.5,
+            (SIZE_MIN + easedT * (SIZE_MAX - SIZE_MIN)) * 0.48,
+          )
+          const outerScale = 1 + 4 * easedT
+          const radius = radiusCore * outerScale
+          const gl = radius * (1.15 + (1 - easedT) * 0.35)
+          ctx.globalAlpha = 1
+          ctx.strokeStyle = `hsla(${H}, ${SAT_LOCK}%, 96%, ${ac * 0.88})`
+          ctx.lineWidth = 0.75
+          ctx.beginPath()
+          ctx.moveTo(p.x - gl, p.y)
+          ctx.lineTo(p.x + gl, p.y)
+          ctx.moveTo(p.x, p.y - gl)
+          ctx.lineTo(p.x, p.y + gl)
+          ctx.stroke()
+          ctx.fillStyle = `hsla(${H}, ${SAT_LOCK}%, 100%, ${ac})`
+          ctx.beginPath()
+          ctx.arc(p.x, p.y, Math.max(0.65, radiusCore * 0.22), 0, Math.PI * 2)
+          ctx.fill()
+          ctx.fillStyle = `hsla(${H}, ${SAT_LOCK}%, ${Math.min(100, Lb + (100 - Lb) * 0.35)}%, ${ac * 0.38})`
+          ctx.beginPath()
+          ctx.arc(p.x, p.y, radius * glowSpread * 0.36, 0, Math.PI * 2)
+          ctx.fill()
+          continue
+        }
 
         const idx =
           SPRITE_BINS <= 1 ? 0 : Math.max(0, Math.min(SPRITE_BINS - 1, Math.round(easedT * (SPRITE_BINS - 1))))
@@ -608,6 +729,76 @@ export function PhotonModule() {
             style={{ accentColor: 'white' }}
           />
         </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-ui" style={{ color: textColorPanel }}>
+            breath: {(breathIntensity * 100).toFixed(0)}%
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(breathIntensity * 100)}
+            onChange={(e) => setBreathIntensity(Number(e.target.value) / 100)}
+            className="w-full"
+            style={{ accentColor: 'white' }}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-ui" style={{ color: textColorPanel }}>
+            breath Hz: {breathHz.toFixed(2)}
+          </label>
+          <input
+            type="range"
+            min={5}
+            max={120}
+            value={Math.round(breathHz * 100)}
+            onChange={(e) => setBreathHz(Number(e.target.value) / 100)}
+            className="w-full"
+            style={{ accentColor: 'white' }}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-ui" style={{ color: textColorPanel }}>
+            flicker: {(flickerIntensity * 100).toFixed(0)}%
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(flickerIntensity * 100)}
+            onChange={(e) => setFlickerIntensity(Number(e.target.value) / 100)}
+            className="w-full"
+            style={{ accentColor: 'white' }}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-ui" style={{ color: textColorPanel }}>
+            sharp %: {(sharpPhotonRatio * 100).toFixed(0)}
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(sharpPhotonRatio * 100)}
+            onChange={(e) => setSharpPhotonRatio(Number(e.target.value) / 100)}
+            className="w-full"
+            style={{ accentColor: 'white' }}
+          />
+        </div>
+        <div>
+          <label className="mb-1 block text-[10px] font-ui" style={{ color: textColorPanel }}>
+            photon boost: {(sharpPhotonBoost * 100).toFixed(0)}%
+          </label>
+          <input
+            type="range"
+            min={80}
+            max={200}
+            value={Math.round(sharpPhotonBoost * 100)}
+            onChange={(e) => setSharpPhotonBoost(Number(e.target.value) / 100)}
+            className="w-full"
+            style={{ accentColor: 'white' }}
+          />
+        </div>
 
         <GlobalShortcutsHint color="rgba(255,255,255,0.45)" />
       </div>
@@ -622,6 +813,13 @@ export function PhotonModule() {
         </div>
         <div>BASE COLOR · {hslaStr}</div>
         <div>BLUR LEVEL · {(blurIntensity * 100).toFixed(0)}%</div>
+        <div>
+          BREATH · {(breathIntensity * 100).toFixed(0)}% @ {breathHz.toFixed(2)} Hz
+        </div>
+        <div>
+          FLICKER · {(flickerIntensity * 100).toFixed(0)}% · SHARP · {(sharpPhotonRatio * 100).toFixed(0)}% · BOOST{' '}
+          {(sharpPhotonBoost * 100).toFixed(0)}%
+        </div>
       </div>
     </div>
   )
