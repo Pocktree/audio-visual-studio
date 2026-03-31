@@ -1,8 +1,21 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, useDeferredValue } from 'react'
 import { motion } from 'framer-motion'
 import { RippleButton } from './RippleButton'
 import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
+import { TypoSynthMode } from './TypoSynthMode'
+import { AUDIO_GRID_F0 } from './audioGridMap'
+
+/** Scale-invariant Typo-Synth 音高/列映射（实现见 audioGridMap.js） */
+export {
+  AUDIO_GRID_F0,
+  AUDIO_GRID_GHOST_MS,
+  computePitchHz,
+  computeColNorm,
+  computeRowNorm,
+  computePanFromColNorm,
+  computeDetuneCentsFromColNorm,
+} from './audioGridMap'
 
 // Display-P3 广色域
 const DISPLAY_P3 = {
@@ -268,10 +281,13 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
   const [bfiActive, setBfiActive] = useState(false)
   const [colorOffsetMode, setColorOffsetMode] = useState(false)
   const [gridTestMode, setGridTestMode] = useState(null) // null | 'uniformity' | 'bitdepth'
+  /** PO-12 风格 Typo-Synth：Tone 鼓组 + Screen 反应堆 + Pad / 音序 */
+  const [typoSynthMode, setTypoSynthMode] = useState(false)
   const [uniformityIndex, setUniformityIndex] = useState(0) // 0-6: 白/黑/红/绿/5%灰/蓝/18%灰
   const [bitDepthDither, setBitDepthDither] = useState(true) // true = imageSmoothingEnabled
   const [testModeHintVisible, setTestModeHintVisible] = useState(false)
   const testModeHintTimeoutRef = useRef(null)
+  const controlsPanelRef = useRef(null)
   const [isNarrowColorOffset, setIsNarrowColorOffset] = useState(false) // COLOR OFFSET 窄屏堆叠模式：width < 1024 或竖屏
   const REF_GRAY = { low: 32, mid: 128, high: 224 }
   const [calibrationData, setCalibrationData] = useState(() => ({
@@ -319,16 +335,34 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
     })
   }
   
-  // 当前调色板
+  // 当前调色板（与主网格 / Typo-Synth 共用）
   const palette = colorSpace === 'p3' ? PALETTE_P3 : PALETTE_SRGB
 
-  // 右上角显示/隐藏面板
+  /** 拖动 size 滑块时推迟应用到合成器，避免 n 连续变化导致子网格反复卸载/重算出现整屏黑闪 */
+  const deferredSynthN = useDeferredValue(gridSizeNum)
+
+  const typoSynthAudioGrid = useMemo(
+    () => ({
+      f0: AUDIO_GRID_F0,
+      totalRows: deferredSynthN,
+      totalCols: deferredSynthN,
+    }),
+    [deferredSynthN],
+  )
+
+  // 右上角热区或悬停在设置面板上时保持显示（避免拖滑块移出角落后面板消失/无法操作）
   useEffect(() => {
     const threshold = 150
     let hideTimeout = null
     const handleMouseMove = (e) => {
       const isInCorner = e.clientX > window.innerWidth - threshold && e.clientY < threshold
-      if (isInCorner) {
+      let isOverPanel = false
+      const panel = controlsPanelRef.current
+      if (panel) {
+        const r = panel.getBoundingClientRect()
+        isOverPanel = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom
+      }
+      if (isInCorner || isOverPanel) {
         if (hideTimeout) {
           clearTimeout(hideTimeout)
           hideTimeout = null
@@ -371,7 +405,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
 
   // 自由轮播：定时在 1×1 到 gridSizeNum×gridSizeNum 之间随机切换
   useEffect(() => {
-    if (!autoCycle || colorOffsetMode || gridTestMode) return
+    if (!autoCycle || colorOffsetMode || gridTestMode || typoSynthMode) return
     const interval = setInterval(() => {
       const max = Math.max(GRID_SIZE_MIN, Math.min(GRID_SIZE_MAX, gridSizeNum))
       const next = getRandomSizeUpTo(max)
@@ -379,7 +413,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
       setCells(generateGrid(next.rows, next.cols, palette))
     }, AUTO_CYCLE_INTERVAL)
     return () => clearInterval(interval)
-  }, [autoCycle, colorOffsetMode, gridTestMode, gridSizeNum, palette])
+  }, [autoCycle, colorOffsetMode, gridTestMode, typoSynthMode, gridSizeNum, palette])
 
   // 色彩空间切换时重新生成网格
   useEffect(() => {
@@ -387,7 +421,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
   }, [colorSpace, gridSize, palette])
 
   // 进入 COLOR OFFSET 或 纯色/色深测试 时：自动关闭 BFI，暂停轮播（与 COLOR OFFSET 一致）
-  const inTestOrOffsetMode = colorOffsetMode || !!gridTestMode
+  const inTestOrOffsetMode = colorOffsetMode || !!gridTestMode || typoSynthMode
   useEffect(() => {
     if (inTestOrOffsetMode) {
       setBfiEnabled(false)
@@ -482,9 +516,9 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
     }
   }, [gridTestMode])
 
-  // 仅 Grid 内：周期性闪黑测试（BFI）
+  // 仅 Grid 内：周期性闪黑测试（BFI）；Typo-Synth 全屏时关闭
   useEffect(() => {
-    if (!bfiEnabled) {
+    if (!bfiEnabled || typoSynthMode) {
       setBfiActive(false)
       return
     }
@@ -499,12 +533,12 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
       clearInterval(intervalId)
       if (timeoutId) clearTimeout(timeoutId)
     }
-  }, [bfiEnabled, bfiDurationMs])
+  }, [bfiEnabled, bfiDurationMs, typoSynthMode])
 
   const fontStack = fontFamily ?? 'Inter, sans-serif'
 
-  // 字体未加载时显示纯色块
-  if (!fontLoaded) {
+  // 字体未加载时显示纯色块（Typo-Synth 自带排版，不等待字体）
+  if (!fontLoaded && !typoSynthMode) {
     return (
       <div
         className="w-full h-full grid"
@@ -531,8 +565,22 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
 
   return (
     <div className="w-full h-full relative">
+      {typoSynthMode && (
+        <div className="absolute inset-0 z-20 flex h-full min-h-0 w-full flex-col bg-black">
+          <TypoSynthMode
+            n={deferredSynthN}
+            gridSizeMin={GRID_SIZE_MIN}
+            gridSizeMax={GRID_SIZE_MAX}
+            fontFamily={fontStack}
+            palette={palette}
+            colorSpace={colorSpace}
+            audioGrid={typoSynthAudioGrid}
+          />
+        </div>
+      )}
+
       {/* 仅 Grid：闪黑测试 overlay（正中间 Logo + 下方 BFI 测试文字 + 十字准星） */}
-      {bfiActive && (
+      {bfiActive && !typoSynthMode && (
         <div
           className="absolute inset-0 z-40 bg-black pointer-events-none flex items-center justify-center"
           aria-hidden
@@ -566,7 +614,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
       )}
 
       {/* COLOR OFFSET 三点白平衡量化模式 */}
-      {colorOffsetMode && (() => {
+      {colorOffsetMode && !typoSynthMode && (() => {
         const base = REF_GRAY[calibrationLevel]
         const adjR = Math.min(255, Math.max(0, base + offsetR))
         const adjG = Math.min(255, Math.max(0, base + offsetG))
@@ -793,7 +841,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
       })()}
 
       {/* 纯色自检：全屏点对点填充，无边框无 UI，1-7 或点击切换；死点/坏点/脏屏/Gamma 测试 */}
-      {gridTestMode === 'uniformity' && (
+      {gridTestMode === 'uniformity' && !typoSynthMode && (
         <div
           className="absolute inset-0 z-30 outline-none"
           style={{
@@ -810,7 +858,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
       )}
 
       {/* 色深断层测试：Canvas 渐变 120–135，D 切换 Dither */}
-      {gridTestMode === 'bitdepth' && (
+      {gridTestMode === 'bitdepth' && !typoSynthMode && (
         <BitDepthCanvas
           dither={bitDepthDither}
           className="absolute inset-0 z-30 w-full h-full block"
@@ -818,7 +866,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
       )}
 
       {/* 纯色/色深：左上角 logo + 左下角 模式+操作指南，仅鼠标移动或按键时显示，10px Montserrat，2s 后消失 */}
-      {gridTestMode && testModeHintVisible && (() => {
+      {gridTestMode && !typoSynthMode && testModeHintVisible && (() => {
         const isUniformityWhite = gridTestMode === 'uniformity' && uniformityIndex === 0
         const isUniformityGreen = gridTestMode === 'uniformity' && uniformityIndex === 3
         const isUniformity18Gray = gridTestMode === 'uniformity' && uniformityIndex === 6
@@ -861,36 +909,39 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
         )
       })()}
 
-      <div
-        className="w-full h-full grid"
-        style={{
-          gridTemplateColumns: `repeat(${gridSize.cols}, 1fr)`,
-          gridTemplateRows: `repeat(${gridSize.rows}, 1fr)`,
-          gap: 0,
-        }}
-      >
-        {cells.map((cell, i) =>
-          cell.type === 'typo' ? (
-            <KineticCell
-              key={`${gridSize.rows}-${gridSize.cols}-${i}`}
-              cell={cell}
-              fontFamily={fontStack}
-              palette={palette}
-              onClick={() => onModuleChange?.('color')}
-            />
-          ) : (
-            <SolidCell
-              key={`${gridSize.rows}-${gridSize.cols}-${i}`}
-              cell={cell}
-              palette={palette}
-              onClick={() => onModuleChange?.('color')}
-            />
-          )
-        )}
-      </div>
+      {!typoSynthMode && (
+        <div
+          className="w-full h-full grid"
+          style={{
+            gridTemplateColumns: `repeat(${gridSize.cols}, 1fr)`,
+            gridTemplateRows: `repeat(${gridSize.rows}, 1fr)`,
+            gap: 0,
+          }}
+        >
+          {cells.map((cell, i) =>
+            cell.type === 'typo' ? (
+              <KineticCell
+                key={`${gridSize.rows}-${gridSize.cols}-${i}`}
+                cell={cell}
+                fontFamily={fontStack}
+                palette={palette}
+                onClick={() => onModuleChange?.('color')}
+              />
+            ) : (
+              <SolidCell
+                key={`${gridSize.rows}-${gridSize.cols}-${i}`}
+                cell={cell}
+                palette={palette}
+                onClick={() => onModuleChange?.('color')}
+              />
+            )
+          )}
+        </div>
+      )}
 
       {/* 右上角控制面板 - 1px 灰框、圆角，滑块与按钮同宽 */}
       <div
+        ref={controlsPanelRef}
         className={`absolute top-4 right-4 z-50 flex flex-col gap-2 p-3 w-[140px] rounded-lg transition-opacity duration-300 ${
           showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
@@ -926,7 +977,25 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
         >
           auto: {autoCycle ? 'on' : 'off'}
         </RippleButton>
-        
+
+        <RippleButton
+          type="button"
+          onClick={() => {
+            setColorOffsetMode(false)
+            setGridTestMode(null)
+            setTypoSynthMode((t) => !t)
+          }}
+          className="text-[10px] font-ui py-1 px-2 border rounded-md text-left w-full"
+          style={{
+            borderColor: btnBorder,
+            color: typoSynthMode ? btnActive : textColor,
+            background: typoSynthMode ? 'rgba(255,255,255,0.1)' : 'transparent',
+          }}
+          title="Typo-Synth · PO-12 风格 · Tone.js 鼓组 · LIVE / SEQ"
+        >
+          TYPO_SYNTH: {typoSynthMode ? 'on' : 'off'}
+        </RippleButton>
+
         {/* 色彩空间切换 */}
         <div className="text-[10px] font-ui" style={{ color: textColor }}>
           <div className="mb-1">color space</div>
@@ -990,6 +1059,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
         <RippleButton
           type="button"
           onClick={() => {
+            setTypoSynthMode(false)
             setGridTestMode(null)
             setColorOffsetMode((c) => !c)
           }}
@@ -1006,6 +1076,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
         <RippleButton
           type="button"
           onClick={() => {
+            setTypoSynthMode(false)
             setColorOffsetMode(false)
             setGridTestMode((m) => (m === 'uniformity' ? null : 'uniformity'))
           }}
@@ -1022,6 +1093,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
         <RippleButton
           type="button"
           onClick={() => {
+            setTypoSynthMode(false)
             setColorOffsetMode(false)
             setGridTestMode((m) => (m === 'bitdepth' ? null : 'bitdepth'))
           }}

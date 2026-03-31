@@ -1,12 +1,70 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { RippleButton } from './RippleButton'
-import { GlobalShortcutsHint } from './GlobalShortcutsHint'
+import { GlobalShortcutsHint, KeyCapButton } from './GlobalShortcutsHint'
 import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
+import { useAudioEngine } from '../hooks/useAudioEngine'
 
 const WIDE_GAMUT = {
   white: '#FFFFFF',
   black: '#000000',
   red: '#FF0000',
+}
+
+const RAIN_RED = '#FF0000'
+const CLIP_YELLOW = '#FFFF00'
+
+/** N 键循环：静音 → 白噪 → 粉噪 → 棕噪 */
+const NOISE_MODE_ORDER = ['mute', 'white', 'pink', 'brown']
+
+/** 与滑块 / 压力测试一致：粒子少 → 声小、稀疏；粒子多 → 声大、饱满 */
+const DENSITY_AUDIO_MIN = 10
+const DENSITY_AUDIO_MAX = 2000
+
+function densityToNoiseGain(d) {
+  const t = Math.max(0, Math.min(1, (d - DENSITY_AUDIO_MIN) / (DENSITY_AUDIO_MAX - DENSITY_AUDIO_MIN)))
+  // 低密度时显著压低粉/白噪电平（t^2.6），避免「粒子少仍觉噪声很密」
+  const shaped = Math.pow(t, 2.6)
+  return 0.004 + shaped * 0.3
+}
+
+function densityToSynthGain(d) {
+  const t = Math.max(0, Math.min(1, (d - DENSITY_AUDIO_MIN) / (DENSITY_AUDIO_MAX - DENSITY_AUDIO_MIN)))
+  return 0.006 + t * t * 0.13
+}
+
+/** 手动模式下：0～100% → 合成器总线增益（与 auto 上限同量级） */
+function manualSynthPctToGain(pct) {
+  const t = Math.max(0, Math.min(100, pct)) / 100
+  return 0.002 + t * t * 0.22
+}
+
+function resolveSynthBusGain(densityVal, auto, manualPct) {
+  if (auto) return densityToSynthGain(densityVal)
+  return manualSynthPctToGain(manualPct)
+}
+
+/** 与面板 speed 滑块 1～30 对齐：慢 → 疏、慢；快 → 密、疾 */
+const SPEED_MIN = 1
+const SPEED_MAX = 30
+
+function speedNorm(s) {
+  return Math.max(0, Math.min(1, (s - SPEED_MIN) / (SPEED_MAX - SPEED_MIN)))
+}
+
+function speedToNoiseSparseMul(s) {
+  const t = speedNorm(s)
+  return 0.12 + 0.88 * Math.pow(t, 1.22)
+}
+
+function speedToSynthSparseMul(s) {
+  const t = speedNorm(s)
+  return 0.2 + 0.8 * Math.pow(t, 1.08)
+}
+
+/** 缓冲噪声播放速率：慢雨 → 更低 playbackRate，听感更「拖、疏」（最慢档再压低） */
+function speedToNoisePlaybackRate(s) {
+  const t = speedNorm(s)
+  return 0.165 + 1.215 * t
 }
 
 // 水蓝色系（雨滴用）
@@ -35,14 +93,189 @@ export function RainTestModule() {
   const lastFpsRef = useRef(0) // 动画循环内每 500ms 更新，用于压力测试时禁止 FPS 跌破半刷新率后继续 +
   const cycleDirectionRef = useRef(1) // 1=递增 -1=递减，用于左下角密度自动循环
 
-  // 控制参数 - 用于 UI 显示，初始随机
+  const {
+    startPinkNoise,
+    startBrownNoise,
+    startWhiteNoise,
+    stopNoise,
+    connectMicrophone,
+    disconnectMicrophone,
+    setUnderwaterMuffling,
+    setMasterGain,
+    setNoiseGain,
+    setSynthGain,
+    setNoisePlaybackRate,
+    getVolume,
+    checkClipping,
+    setSynthOscillatorCount,
+  } = useAudioEngine()
+
+  const [noiseMode, setNoiseMode] = useState('pink')
+  const [micOn, setMicOn] = useState(false)
+  const [hudFps, setHudFps] = useState(0)
+  const [pointerCoords, setPointerCoords] = useState({ x: 0, y: 0 })
   const [speed, setSpeed] = useState(() => 3 + Math.floor(Math.random() * 10))
   const [density, setDensity] = useState(() => 30 + Math.floor(Math.random() * 80))
   const [showGrid, setShowGrid] = useState(true)
   const [showLabels, setShowLabels] = useState(true)
   const [isLightMode, setIsLightMode] = useState(false)
-  const [colorScheme, setColorScheme] = useState('default') // 'default' | 'water' 水蓝雨+粉网格
+  const [colorScheme, setColorScheme] = useState('default')
   const [showControls, setShowControls] = useState(false)
+  /** true：合成器总线随粒子密度自动变化；false：仅用手动滑块 */
+  const [synthBusAuto, setSynthBusAuto] = useState(true)
+  const [synthBusManualPct, setSynthBusManualPct] = useState(42)
+
+  const noiseModeRef = useRef('pink')
+  noiseModeRef.current = noiseMode
+
+  const applyNoiseMode = useCallback(async (mode) => {
+    const d = densityRef.current
+    const spd = speedRef.current
+    const ng = densityToNoiseGain(d) * speedToNoiseSparseMul(spd)
+    const sg =
+      resolveSynthBusGain(d, synthBusAuto, synthBusManualPct) * speedToSynthSparseMul(spd)
+    const pr = speedToNoisePlaybackRate(spd)
+    if (mode === 'mute') {
+      stopNoise()
+      setMasterGain(0)
+      return
+    }
+    setMasterGain(0.85)
+    setSynthGain(sg)
+    if (mode === 'white') {
+      await startWhiteNoise(ng, pr)
+      return
+    }
+    if (mode === 'pink') {
+      await startPinkNoise(ng, pr)
+      return
+    }
+    await startBrownNoise(ng, pr)
+  }, [
+    startPinkNoise,
+    startBrownNoise,
+    startWhiteNoise,
+    stopNoise,
+    setMasterGain,
+    setSynthGain,
+    synthBusAuto,
+    synthBusManualPct,
+  ])
+
+  useEffect(() => {
+    const ng = densityToNoiseGain(density) * speedToNoiseSparseMul(speed)
+    const sg =
+      resolveSynthBusGain(density, synthBusAuto, synthBusManualPct) * speedToSynthSparseMul(speed)
+    setSynthGain(sg)
+    if (noiseMode !== 'mute') {
+      setNoiseGain(ng)
+      setNoisePlaybackRate(speedToNoisePlaybackRate(speed))
+    }
+  }, [
+    density,
+    speed,
+    noiseMode,
+    synthBusAuto,
+    synthBusManualPct,
+    setNoiseGain,
+    setSynthGain,
+    setNoisePlaybackRate,
+  ])
+
+  const getVolumeRef = useRef(getVolume)
+  const checkClippingRef = useRef(checkClipping)
+  getVolumeRef.current = getVolume
+  checkClippingRef.current = checkClipping
+
+  const setHudFpsRef = useRef(setHudFps)
+  setHudFpsRef.current = setHudFps
+
+  const vuMeterFillRef = useRef(null)
+
+  // 首次点击画布区域启动当前噪声模式（与 N 循环一致）
+  useEffect(() => {
+    const kick = async () => {
+      document.removeEventListener('pointerdown', kick)
+      try {
+        await applyNoiseMode(noiseModeRef.current)
+      } catch {
+        /* */
+      }
+    }
+    document.addEventListener('pointerdown', kick, { passive: true })
+    return () => document.removeEventListener('pointerdown', kick)
+  }, [applyNoiseMode])
+
+  useEffect(() => {
+    if (!micOn) {
+      disconnectMicrophone()
+      return
+    }
+    let cancelled = false
+    void connectMicrophone().catch(() => {
+      if (!cancelled) setMicOn(false)
+    })
+    return () => {
+      cancelled = true
+      disconnectMicrophone()
+    }
+  }, [micOn, connectMicrophone, disconnectMicrophone])
+
+  const cycleNoiseMode = useCallback(() => {
+    const next =
+      NOISE_MODE_ORDER[(NOISE_MODE_ORDER.indexOf(noiseModeRef.current) + 1) % NOISE_MODE_ORDER.length]
+    noiseModeRef.current = next
+    setNoiseMode(next)
+    void applyNoiseMode(next)
+  }, [applyNoiseMode])
+
+  const toggleMic = useCallback(() => {
+    setMicOn((v) => !v)
+  }, [])
+
+  useEffect(() => {
+    const onKey = (e) => {
+      const el = e.target
+      if (
+        el &&
+        (el.tagName === 'INPUT' ||
+          el.tagName === 'TEXTAREA' ||
+          el.tagName === 'SELECT' ||
+          el.isContentEditable)
+      ) {
+        return
+      }
+      if (e.key === 'n' || e.key === 'N') {
+        e.preventDefault()
+        cycleNoiseMode()
+        return
+      }
+      if (e.key === 'm' || e.key === 'M') {
+        e.preventDefault()
+        toggleMic()
+      }
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [cycleNoiseMode, toggleMic])
+
+  useEffect(() => {
+    const onMove = (e) => setPointerCoords({ x: e.clientX, y: e.clientY })
+    window.addEventListener('mousemove', onMove, { passive: true })
+    return () => window.removeEventListener('mousemove', onMove)
+  }, [])
+
+  useEffect(() => {
+    setUnderwaterMuffling(colorScheme === 'water')
+  }, [colorScheme, setUnderwaterMuffling])
+
+  const lastSynthNRef = useRef(-1)
+  useEffect(() => {
+    const n = Math.min(24, Math.max(1, Math.round(density / 200)))
+    if (n === lastSynthNRef.current) return
+    lastSynthNRef.current = n
+    setSynthOscillatorCount(n)
+  }, [density, setSynthOscillatorCount])
 
   // 鼠标靠近右上角显示控制面板，移开后延迟隐藏
   useEffect(() => {
@@ -131,7 +364,7 @@ export function RainTestModule() {
     const isWater = colorSchemeRef.current === 'water'
     const lineColor = isWater
       ? WATER_BLUE_PALETTE[Math.floor(Math.random() * WATER_BLUE_PALETTE.length)]
-      : (Math.random() > 0.7 ? '#FF0000' : (isLightMode ? '#000000' : '#FFFFFF'))
+      : (Math.random() > 0.7 ? RAIN_RED : (isLightMode ? '#000000' : '#FFFFFF'))
     return {
       x: Math.random() * w,
       y: Math.random() * -h * 2,
@@ -189,13 +422,26 @@ export function RainTestModule() {
         lastFpsRef.current = frameCount / ((now - lastFpsTime) / 1000)
         frameCount = 0
         lastFpsTime = now
+        setHudFpsRef.current(lastFpsRef.current)
       }
 
       // 使用 CSS 尺寸而不是绘图表面尺寸
       const w = window.innerWidth
       const h = window.innerHeight
       const currentSpeed = speedRef.current
-      const currentDensity = densityRef.current
+      const baseDensity = densityRef.current
+      const vol = getVolumeRef.current()
+      const vuEl = vuMeterFillRef.current
+      if (vuEl) {
+        const vuLvl = Math.min(1, vol * 7.5)
+        vuEl.style.transform = `scaleY(${vuLvl})`
+      }
+      const amp = Math.min(1, vol * 4.2)
+      const currentDensity = Math.min(
+        2000,
+        Math.max(10, Math.round(baseDensity * (0.42 + amp * 1.15))),
+      )
+      const clipping = checkClippingRef.current()
       const currentShowGrid = showGridRef.current
       const currentShowLabels = showLabelsRef.current
       const isLight = isLightModeRef.current
@@ -211,9 +457,9 @@ export function RainTestModule() {
       const btnBorder = isLight ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.3)'
       const btnActive = isLight ? 'rgba(0,0,0,0.9)' : 'rgba(255,255,255,0.9)'
       
-      // 清除画布 - 清除整个绘图表面
+      // 清除画布（逻辑坐标 w×h，与 scale(dpr) 及 30px 网格一致）
       ctx.fillStyle = bgColor
-      ctx.fillRect(0, 0, canvas.width, canvas.height)
+      ctx.fillRect(0, 0, w, h)
       
       // 绘制网格背景 - 使用 CSS 尺寸
       if (currentShowGrid) {
@@ -254,15 +500,23 @@ export function RainTestModule() {
           // 重置颜色（水蓝配色时从水蓝色系中随机）
           line.color = isWater
             ? WATER_BLUE_PALETTE[Math.floor(Math.random() * WATER_BLUE_PALETTE.length)]
-            : (Math.random() > 0.7 ? '#FF0000' : (isLight ? '#000000' : '#FFFFFF'))
+            : (Math.random() > 0.7 ? RAIN_RED : (isLight ? '#000000' : '#FFFFFF'))
         }
 
-        // 绘制线条（WATER on 用水蓝；WATER off 时 LIGHT on 黑+红、LIGHT off 白+红）
-        ctx.strokeStyle = line.color
+        // 绘制线条（WATER on 用水蓝；失真：原红雨变为黄 + 微小抖动）
+        let stroke = line.color
+        let jx = 0
+        let jy = 0
+        if (!isWater && line.color === RAIN_RED && clipping) {
+          stroke = CLIP_YELLOW
+          jx = (Math.random() - 0.5) * 3.2
+          jy = (Math.random() - 0.5) * 3.2
+        }
+        ctx.strokeStyle = stroke
         ctx.lineWidth = line.width
         ctx.beginPath()
-        ctx.moveTo(line.x, line.y)
-        ctx.lineTo(line.x, line.y + line.length)
+        ctx.moveTo(line.x + jx, line.y + jy)
+        ctx.lineTo(line.x + jx, line.y + line.length + jy)
         ctx.stroke()
         
         // 绘制标签
@@ -308,6 +562,7 @@ export function RainTestModule() {
   const btnActive = isLightMode ? 'rgba(0,0,0,0.9)' : 'rgba(255,255,255,0.9)'
 
   const logoFill = isLightMode ? '#000000' : '#FFFFFF'
+  const hintShortcutColor = isLightMode ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)'
 
   return (
     <div className="fixed inset-0 overflow-hidden" style={{ backgroundColor: '#000000' }}>
@@ -322,95 +577,162 @@ export function RainTestModule() {
         </svg>
       </div>
 
-      {/* 控制面板 - 右上角，light on 时滑块圆形 thumb 加 1px 灰框 */}
-      <div 
-        className={`absolute top-4 right-4 z-50 flex flex-col gap-2 p-3 w-[140px] rounded-lg transition-opacity duration-300 ${isLightMode ? 'rain-panel-light' : ''} ${
-          showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+      {/* 右上角：视觉面板 + 声音/快捷键面板，小间距堆叠 */}
+      <div
+        className={`absolute top-4 right-4 z-50 flex w-[160px] flex-col gap-1 transition-opacity duration-300 ${
+          showControls ? 'opacity-100' : 'pointer-events-none opacity-0'
         }`}
-        style={{ 
-          background: panelBg, 
-          border: `1px solid ${panelBorder}`,
-          color: textColor
-        }}
       >
-        <div>
-          <label 
-            className="block text-[10px] font-ui mb-1"
-            style={{ color: textColor }}
+        <div
+          className={`flex max-h-[min(48vh,360px)] flex-col gap-2 overflow-y-auto rounded-lg p-3 ${isLightMode ? 'rain-panel-light' : ''}`}
+          style={{
+            background: panelBg,
+            border: `1px solid ${panelBorder}`,
+            color: textColor,
+          }}
+        >
+          <div>
+            <label
+              className="mb-1 block text-[10px] font-ui"
+              style={{ color: textColor }}
+            >
+              speed: {speed} (↑↓)
+            </label>
+            <input
+              type="range"
+              min="1"
+              max="30"
+              value={speed}
+              onChange={(e) => setSpeed(Number(e.target.value))}
+              className="w-full"
+              style={{ accentColor: 'white' }}
+            />
+          </div>
+          <div>
+            <label
+              className="mb-1 block text-[10px] font-ui"
+              style={{ color: textColor }}
+            >
+              density: {density} (+/−500, + disabled if FPS &lt; ½ refresh)
+            </label>
+            <input
+              type="range"
+              min="10"
+              max="2000"
+              value={Math.min(density, 2000)}
+              onChange={(e) => setDensity(Number(e.target.value))}
+              className="w-full"
+              style={{ accentColor: 'white' }}
+            />
+          </div>
+          <RippleButton
+            onClick={() => setShowGrid(!showGrid)}
+            className="w-full rounded-md border px-2 py-1 text-left text-[10px] font-ui"
+            style={{
+              borderColor: btnBorder,
+              color: showGrid ? btnActive : textColor,
+            }}
           >
-            speed: {speed} (↑↓)
-          </label>
-          <input
-            type="range"
-            min="1"
-            max="30"
-            value={speed}
-            onChange={(e) => setSpeed(Number(e.target.value))}
-            className="w-full"
-            style={{ accentColor: 'white' }}
-          />
-        </div>
-        <div>
-          <label 
-            className="block text-[10px] font-ui mb-1"
-            style={{ color: textColor }}
+            grid: {showGrid ? 'on' : 'off'}
+          </RippleButton>
+          <RippleButton
+            onClick={() => setShowLabels(!showLabels)}
+            className="w-full rounded-md border px-2 py-1 text-left text-[10px] font-ui"
+            style={{
+              borderColor: btnBorder,
+              color: showLabels ? btnActive : textColor,
+            }}
           >
-            density: {density} (+/−500, + disabled if FPS &lt; ½ refresh)
-          </label>
-          <input
-            type="range"
-            min="10"
-            max="2000"
-            value={Math.min(density, 2000)}
-            onChange={(e) => setDensity(Number(e.target.value))}
-            className="w-full"
-            style={{ accentColor: 'white' }}
-          />
+            labels: {showLabels ? 'on' : 'off'}
+          </RippleButton>
+          <RippleButton
+            onClick={() => setIsLightMode(!isLightMode)}
+            className="w-full rounded-md border px-2 py-1 text-left text-[10px] font-ui"
+            style={{
+              borderColor: btnBorder,
+              color: isLightMode ? btnActive : textColor,
+              background: isLightMode ? 'rgba(0,0,0,0.1)' : 'transparent',
+            }}
+          >
+            light: {isLightMode ? 'on' : 'off'}
+          </RippleButton>
+          <RippleButton
+            onClick={() => setColorScheme((s) => (s === 'water' ? 'default' : 'water'))}
+            className="w-full rounded-md border px-2 py-1 text-left text-[10px] font-ui"
+            style={{
+              borderColor: btnBorder,
+              color: colorScheme === 'water' ? btnActive : textColor,
+              background: colorScheme === 'water' ? 'rgba(0,191,255,0.15)' : 'transparent',
+            }}
+          >
+            water: {colorScheme === 'water' ? 'on' : 'off'}
+          </RippleButton>
         </div>
-        <RippleButton
-          onClick={() => setShowGrid(!showGrid)}
-          className="text-[10px] font-ui py-1 px-2 border rounded-md w-full text-left"
-          style={{ 
-            borderColor: btnBorder,
-            color: showGrid ? btnActive : textColor
-          }}
-        >
-          grid: {showGrid ? 'on' : 'off'}
-        </RippleButton>
-        <RippleButton
-          onClick={() => setShowLabels(!showLabels)}
-          className="text-[10px] font-ui py-1 px-2 border rounded-md w-full text-left"
-          style={{ 
-            borderColor: btnBorder,
-            color: showLabels ? btnActive : textColor
-          }}
-        >
-          labels: {showLabels ? 'on' : 'off'}
-        </RippleButton>
-        <RippleButton
-          onClick={() => setIsLightMode(!isLightMode)}
-          className="text-[10px] font-ui py-1 px-2 border rounded-md w-full text-left"
-          style={{ 
-            borderColor: btnBorder,
-            color: isLightMode ? btnActive : textColor,
-            background: isLightMode ? 'rgba(0,0,0,0.1)' : 'transparent'
-          }}
-        >
-          light: {isLightMode ? 'on' : 'off'}
-        </RippleButton>
-        <RippleButton
-          onClick={() => setColorScheme(s => s === 'water' ? 'default' : 'water')}
-          className="text-[10px] font-ui py-1 px-2 border rounded-md w-full text-left"
-          style={{ 
-            borderColor: btnBorder,
-            color: colorScheme === 'water' ? btnActive : textColor,
-            background: colorScheme === 'water' ? 'rgba(0,191,255,0.15)' : 'transparent'
-          }}
-        >
-          water: {colorScheme === 'water' ? 'on' : 'off'}
-        </RippleButton>
 
-        <GlobalShortcutsHint color={isLightMode ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)'} />
+        <div
+          className={`flex max-h-[min(42vh,320px)] flex-col gap-2 overflow-y-auto rounded-lg p-3 ${isLightMode ? 'rain-panel-light' : ''}`}
+          style={{
+            background: panelBg,
+            border: `1px solid ${panelBorder}`,
+            color: textColor,
+          }}
+        >
+          <RippleButton
+            onClick={() => setSynthBusAuto((v) => !v)}
+            className="w-full rounded-md border px-2 py-1 text-left text-[10px] font-ui"
+            style={{
+              borderColor: btnBorder,
+              color: synthBusAuto ? btnActive : textColor,
+            }}
+            title="开：合成器总线随粒子密度；关：仅用手动滑块"
+          >
+            synth bus: {synthBusAuto ? 'auto' : 'manual'}
+          </RippleButton>
+          {!synthBusAuto && (
+            <div>
+              <label className="mb-1 block text-[10px] font-ui" style={{ color: textColor }}>
+                synth level: {synthBusManualPct}%
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={synthBusManualPct}
+                onChange={(e) => setSynthBusManualPct(Number(e.target.value))}
+                className="w-full"
+                style={{ accentColor: 'white' }}
+              />
+            </div>
+          )}
+          <div
+            className="mt-2 space-y-1.5 border-t border-white/10 pt-2 text-[9px] font-ui leading-snug"
+            style={{ color: hintShortcutColor }}
+          >
+            <div className="flex items-center gap-1.5">
+              <KeyCapButton
+                letter="N"
+                title="N · 噪声模式 · 静音 → 白 → 粉 → 棕 · 点击切换"
+                onActivate={cycleNoiseMode}
+              />
+              <span className="flex min-w-0 items-baseline gap-1">
+                <span className="shrink-0 font-ui">噪声</span>
+                <span className="text-[0.65rem] opacity-70 font-ui">noise · {noiseMode}</span>
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <KeyCapButton
+                letter="M"
+                title="M · 麦克风环境声 → 雨滴分析 · 点击开关"
+                onActivate={toggleMic}
+              />
+              <span className="flex min-w-0 items-baseline gap-1">
+                <span className="shrink-0 font-ui">麦克风</span>
+                <span className="text-[0.65rem] opacity-70 font-ui">mic · {micOn ? 'on' : 'off'}</span>
+              </span>
+            </div>
+            <GlobalShortcutsHint color={hintShortcutColor} noOuterBorder />
+          </div>
+        </div>
       </div>
       <style>{`
         .rain-panel-light input[type="range"]::-webkit-slider-thumb {
@@ -421,13 +743,41 @@ export function RainTestModule() {
         }
       `}</style>
       
-      {/* 左下角：实时粒子数 + 压力测试提示 */}
-      <div 
-        className="absolute bottom-4 left-4 text-[10px] font-ui"
-        style={{ color: 'rgba(255,255,255,0.4)' }}
-      >
-        <div title="当前粒子数">particles: {density}</div>
-        <div title="+ 暴增 500 / − 减少 500；FPS 低于半刷新率时不可再 +">stress: + / − key ±500</div>
+      {/* 左下角：display-p3 VU 在左，注释在右，同高对齐 */}
+      <div className="pointer-events-none absolute bottom-4 left-4 z-40 flex items-stretch gap-3">
+        <div
+          className="relative w-2.5 shrink-0 overflow-hidden rounded-sm border"
+          style={{ borderColor: isLightMode ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.28)' }}
+          title="VU meter · display-p3 gradient"
+          aria-hidden
+        >
+          <div
+            ref={vuMeterFillRef}
+            className="absolute bottom-0 left-0 right-0 h-full w-full origin-bottom"
+            style={{
+              transform: 'scaleY(0)',
+              transformOrigin: 'bottom center',
+              backgroundImage:
+                'linear-gradient(to top, #ff3b2e, #f5d020, #22e066), linear-gradient(to top, color(display-p3 0.98 0.18 0.12), color(display-p3 0.95 0.85 0.08), color(display-p3 0.12 0.95 0.42))',
+            }}
+          />
+        </div>
+        <div
+          className="flex max-w-[min(52vw,280px)] flex-col justify-center space-y-0.5 self-stretch text-[10px] font-ui leading-snug"
+          style={{ color: isLightMode ? 'rgba(0,0,0,0.45)' : 'rgba(255,255,255,0.45)' }}
+        >
+          <div>
+            fps: {hudFps.toFixed(0)} · xy: {pointerCoords.x},{pointerCoords.y}
+          </div>
+          <div title="基准密度（UI）；实际条数随音量调制">particles: {density} (audio-mod)</div>
+          <div title="+ 暴增 500 / − 减少 500；+ 同步提高合成器振荡器数">
+            stress: + / − ±500 · synth ∝ density
+          </div>
+          <div>
+            audio: {noiseMode} · mic: {micOn ? 'on' : 'off'}
+            {colorScheme === 'water' ? ' · LP underwater' : ''}
+          </div>
+        </div>
       </div>
     </div>
   )

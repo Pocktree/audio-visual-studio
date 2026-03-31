@@ -10,6 +10,8 @@ import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
 
 const BG = '#000000'
 const SAT_LOCK = 100
+/** hue 自动漂移速度（度/秒） */
+const HUE_DRIFT_DPS = 14
 const SIZE_MIN = 2
 const SIZE_MAX = 15
 const DENSITY_MIN = 0
@@ -69,6 +71,7 @@ export function PhotonModule() {
   const [renderTrack] = useState(() => detectPhotonRenderTrack())
 
   const [hue, setHue] = useState(0)
+  const [hueDriftPaused, setHueDriftPaused] = useState(false)
   const [lightness, setLightness] = useState(42)
   const [transparency, setTransparency] = useState(0.09)
   const [blurIntensity, setBlurIntensity] = useState(0.26)
@@ -145,6 +148,23 @@ export function PhotonModule() {
   useEffect(() => {
     resizeAndReset()
   }, [density, sharpPhotonRatio, resizeAndReset])
+
+  useEffect(() => {
+    if (hueDriftPaused) return
+    let raf = 0
+    let last = performance.now()
+    const loop = (now) => {
+      const dt = Math.min(0.05, (now - last) / 1000)
+      last = now
+      setHue((h) => {
+        const n = h + HUE_DRIFT_DPS * dt
+        return ((n % 360) + 360) % 360
+      })
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(raf)
+  }, [hueDriftPaused])
 
   useEffect(() => {
     const threshold = 150
@@ -606,7 +626,8 @@ export function PhotonModule() {
     }
   }, [])
 
-  const hslaStr = `hsla(${hue}, ${SAT_LOCK}%, ${lightness}%, ${transparency})`
+  // BASE COLOR 等展示：hsla 中 hue 取整（渲染仍用 hueRef 浮点，色彩连续）
+  const hslaStr = `hsla(${Math.round(hue)}, ${SAT_LOCK}%, ${lightness}%, ${transparency})`
 
   const panelBg = 'rgba(0,0,0,0.85)'
   const panelBorder = 'rgba(255,255,255,0.25)'
@@ -645,14 +666,28 @@ export function PhotonModule() {
         }}
       >
         <div>
-          <label className="mb-1 block text-[10px] font-ui" style={{ color: textColorPanel }}>
-            hue: {hue}
-          </label>
+          <div className="mb-1 flex items-center justify-between gap-1">
+            <label className="text-[10px] font-ui" style={{ color: textColorPanel }}>
+              hue: {Math.round(hue)}
+            </label>
+            <button
+              type="button"
+              onClick={() => setHueDriftPaused((p) => !p)}
+              aria-pressed={hueDriftPaused}
+              className="shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-ui uppercase tracking-wide transition-colors hover:bg-white/10"
+              style={{
+                borderColor: btnBorder,
+                color: textColorPanel,
+              }}
+            >
+              {hueDriftPaused ? 'play' : 'pause'}
+            </button>
+          </div>
           <input
             type="range"
             min={0}
             max={360}
-            value={hue}
+            value={Math.round(hue)}
             onChange={(e) => setHue(Number(e.target.value))}
             className="w-full"
             style={{ accentColor: 'white' }}

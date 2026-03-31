@@ -11,7 +11,10 @@ export const AVS_KEYCAP_EVENTS = {
 
 const KEY_GRAY = '#888888'
 
-function KeyCapButton({ letter, title, eventName }) {
+/**
+ * 与 F / P 同款键帽：可派发 eventName，或直接 onActivate（Rain N/M 等）。
+ */
+export function KeyCapButton({ letter, title, eventName, onActivate }) {
   return (
     <button
       type="button"
@@ -20,7 +23,11 @@ function KeyCapButton({ letter, title, eventName }) {
       onTouchStart={(e) => e.stopPropagation()}
       onClick={(e) => {
         e.stopPropagation()
-        window.dispatchEvent(new CustomEvent(eventName))
+        if (typeof onActivate === 'function') {
+          onActivate()
+        } else if (eventName) {
+          window.dispatchEvent(new CustomEvent(eventName))
+        }
       }}
       className="inline-flex h-5 min-w-[1.125rem] shrink-0 cursor-pointer items-center justify-center rounded border bg-transparent px-1 font-mono text-[0.65rem] leading-none transition-opacity hover:opacity-80"
       style={{ borderColor: KEY_GRAY, color: KEY_GRAY }}
@@ -30,7 +37,12 @@ function KeyCapButton({ letter, title, eventName }) {
   )
 }
 
-export function GlobalShortcutsHint({ color = 'rgba(255,255,255,0.45)', variant = 'panel' }) {
+export function GlobalShortcutsHint({
+  color = 'rgba(255,255,255,0.45)',
+  variant = 'panel',
+  /** true：不包外层 mt/border-t，便于与上方快捷键块共用一条顶部分隔线 */
+  noOuterBorder = false,
+}) {
   const row = 'flex items-center gap-1.5'
   const zhFont = variant === 'inline' ? 'font-mono' : 'font-ui'
   const enFont = variant === 'inline' ? 'font-mono' : 'font-ui'
@@ -67,6 +79,14 @@ export function GlobalShortcutsHint({ color = 'rgba(255,255,255,0.45)', variant 
   if (variant === 'inline') {
     return (
       <div className="mt-1.5 space-y-1" style={{ color }}>
+        {inner}
+      </div>
+    )
+  }
+
+  if (noOuterBorder) {
+    return (
+      <div className="space-y-1.5 text-[9px] font-ui leading-snug" style={{ color }}>
         {inner}
       </div>
     )
