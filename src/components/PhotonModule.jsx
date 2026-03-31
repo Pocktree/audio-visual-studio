@@ -167,7 +167,7 @@ export function PhotonModule() {
   }, [hueDriftPaused])
 
   useEffect(() => {
-    const threshold = 150
+    const threshold = 60
     let hideTimeout = null
     const handleMouseMove = (e) => {
       const isInCorner = e.clientX > window.innerWidth - threshold && e.clientY < threshold

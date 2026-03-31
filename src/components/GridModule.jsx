@@ -352,7 +352,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
 
   // 右上角热区或悬停在设置面板上时保持显示（避免拖滑块移出角落后面板消失/无法操作）
   useEffect(() => {
-    const threshold = 150
+    const threshold = 60
     let hideTimeout = null
     const handleMouseMove = (e) => {
       const isInCorner = e.clientX > window.innerWidth - threshold && e.clientY < threshold

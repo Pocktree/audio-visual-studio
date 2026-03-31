@@ -205,7 +205,7 @@ export function FullWindowType() {
 
   // 右上角显示/隐藏面板：鼠标在角区或面板内时保持显示，点完按钮不会立刻消失
   useEffect(() => {
-    const threshold = 150
+    const threshold = 60
     let hideTimeout = null
     const handleMouseMove = (e) => {
       const isInCorner = e.clientX > window.innerWidth - threshold && e.clientY < threshold

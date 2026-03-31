@@ -279,7 +279,7 @@ export function RainTestModule() {
 
   // 鼠标靠近右上角显示控制面板，移开后延迟隐藏
   useEffect(() => {
-    const threshold = 150
+    const threshold = 60
     let hideTimeout = null
 
     const handleMouseMove = (e) => {

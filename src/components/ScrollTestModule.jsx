@@ -681,7 +681,7 @@ export function ScrollTestModule() {
 
   // 右上角面板显示/隐藏：鼠标在角区或面板内时保持显示
   useEffect(() => {
-    const threshold = 150
+    const threshold = 60
     let hideTimeout = null
     const handleMouseMove = (e) => {
       const isInCorner = e.clientX > window.innerWidth - threshold && e.clientY < threshold
