@@ -1,7 +1,6 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import studioSettings from './config/settings.json'
-import { appConfig } from './config'
 import { useSettings } from './hooks/useSettings'
 import { FullWindowType } from './components/FullWindowType'
 import { IndustrialTypoModule } from './components/IndustrialTypoModule'
@@ -11,7 +10,7 @@ import { RainTestModule } from './components/RainTestModule'
 import { PhotonModule } from './components/PhotonModule'
 import { PerformanceMonitor } from './components/PerformanceMonitor'
 import { RippleButton } from './components/RippleButton'
-import { AVS_KEYCAP_EVENTS } from './components/GlobalShortcutsHint'
+import { AVS_KEYCAP_EVENTS } from './constants/events'
 import './App.css'
 
 // 模块定义 - 首屏为 AUDIO-VISUAL（展示 Studio Logo）
@@ -25,6 +24,7 @@ const MODULES = [
 ]
 
 const AUTO_CYCLE_INTERVAL = 20000 // 20秒
+const MotionDiv = motion.div
 
 function App() {
   const { settings, loading } = useSettings()
@@ -210,7 +210,6 @@ function App() {
     )
   }
 
-  const palette = settings.testColors ?? studioSettings?.modes?.colorTest?.colors ?? appConfig.colors.testColors
   const fontFamily = settings.defaultFontStack?.sans ?? 'var(--font-stack-sans)'
 
   // 渲染当前模块
@@ -233,9 +232,6 @@ function App() {
     }
   }
 
-  // 当前模块索引
-  const currentIndex = MODULES.findIndex(m => m.id === activeModule)
-
   return (
     <div id="app-root" className="fixed inset-0 bg-black">
       {/* 长按 ≥200ms 时边缘极淡 1px 粉色呼吸光 */}
@@ -252,7 +248,7 @@ function App() {
       {/* 主内容 */}
       <AnimatePresence mode="wait">
         {!isTransitioning && (
-          <motion.div
+          <MotionDiv
             key={activeModule}
             className="absolute inset-0"
             style={{ zIndex: 1 }}
@@ -262,7 +258,7 @@ function App() {
             transition={{ duration: 0.1 }}
           >
             {renderModule()}
-          </motion.div>
+          </MotionDiv>
         )}
       </AnimatePresence>
 

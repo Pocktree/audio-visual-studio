@@ -13,7 +13,7 @@ const defaultSettings = {
 export function useSettings() {
   const [settings, setSettings] = useState(defaultSettings)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
+  const error = null
 
   useEffect(() => {
     let done = false

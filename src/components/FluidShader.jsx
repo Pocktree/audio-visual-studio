@@ -147,7 +147,7 @@ export function FluidShaderCanvas({ paused = false }) {
     let program
     try {
       program = createProgram(gl, VERTEX_SOURCE, fragmentSource)
-    } catch (e) {
+    } catch {
       program = createProgram(gl, VERTEX_SOURCE, FRAGMENT_SOURCE)
     }
     const locResolution = gl.getUniformLocation(program, 'u_resolution')

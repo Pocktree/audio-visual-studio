@@ -1,12 +1,18 @@
 /**
- * PHOTON：Canvas 2D 全屏粒子。
+ * PHOTON：Canvas 2D 全屏粒子 + 音频频谱联动。
  * getContext('2d', { alpha: false, desynchronized: true }) — 不透明背景、降低合成开销；
  * 胧胧光感用径向渐变 + globalCompositeOperation 'lighter'（对数千粒子逐帧 shadowBlur 会极卡）。
  * 粒子：呼吸/闪烁调制；部分为锐利高亮光子（十字眩光 + 亮核）。
+ *
+ * 音频联动（AISA + IPAS 规范）：
+ * - 低频（Bass，bins 0-20）→ 控制粒子整体亮度与扩散能量
+ * - 高频（Treble，bins ~60-120）→ 控制粒子闪烁频率
+ * - 需要用户点击激活麦克风（浏览器 Autoplay 策略）
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
+import { useAudioEngine } from '../hooks/useAudioEngine'
 
 const BG = '#000000'
 const SAT_LOCK = 100
@@ -84,6 +90,23 @@ export function PhotonModule() {
   const [sharpPhotonBoost, setSharpPhotonBoost] = useState(1.15)
   const [showControls, setShowControls] = useState(false)
   const [hudFps, setHudFps] = useState(0)
+  /** 音频激活状态（用户点击开启麦克风） */
+  const [audioEnabled, setAudioEnabled] = useState(false)
+
+  // ── 音频引擎（AISA 规范：频谱解构者）──────────────────────
+  const {
+    connectMicrophone,
+    disconnectMicrophone,
+    getFloatFrequencyData,
+  } = useAudioEngine()
+
+  /** FFT 缓冲区（persistent，避免每帧分配） */
+  const fftBufRef = useRef(null)
+  const audioEnabledRef = useRef(false)
+  audioEnabledRef.current = audioEnabled
+  /** 当前帧的音频派生参数（用于动画循环，不触发 React 重渲染） */
+  const audioBassRef = useRef(0)
+  const audioTrebleRef = useRef(0)
 
   const hueRef = useRef(hue)
   const lightnessRef = useRef(lightness)
@@ -126,8 +149,6 @@ export function PhotonModule() {
     if (ctx) {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     }
-    const cx = w / 2
-    const cy = h / 2
     const count = Math.round(
       Math.max(DENSITY_MIN, Math.min(DENSITY_MAX, densityRef.current)),
     )
@@ -298,8 +319,8 @@ export function PhotonModule() {
       const Ta = transparencyRef.current
       const blurK = blurIntensityRef.current
       const vPps = flowVelocityRef.current
-      const brI = breathIntensityRef.current
-      const brHz = breathHzRef.current
+      const baseBrI = breathIntensityRef.current
+      const baseBrHz = breathHzRef.current
       const fkI = flickerIntensityRef.current
       const sharpBoost = sharpPhotonBoostRef.current
 
@@ -308,6 +329,24 @@ export function PhotonModule() {
       ctx.fillRect(0, 0, w, h)
 
       const glowSpread = 1.12 + blurK * 1.85
+
+      // ── AISA 频谱解析：低频控亮度，高频控闪烁节奏 ──────────
+      if (audioEnabledRef.current && fftBufRef.current) {
+        getFloatFrequencyData(fftBufRef.current)
+        const buf = fftBufRef.current
+        // Bass: bins 2-18（避开 DC offset）
+        let bassSum = 0
+        for (let b = 2; b <= 18; b++) bassSum += Math.max(0, buf[b] + 100)
+        audioBassRef.current = bassSum / 17 / 95
+        // Treble: bins 40-90
+        let trebleSum = 0
+        for (let b = 40; b <= 90; b++) trebleSum += Math.max(0, buf[b] + 100)
+        audioTrebleRef.current = trebleSum / 51 / 95
+      }
+      const audioBoost = 1 + audioBassRef.current * 0.45
+      const audioPitch = 1 + audioTrebleRef.current * 0.55
+      const brI = Math.min(1, baseBrI * audioBoost)
+      const brHz = baseBrHz * audioPitch
 
       const tSec = now * 0.001
       const omega = Math.PI * 2 * brHz
@@ -475,8 +514,8 @@ export function PhotonModule() {
       const Ta = transparencyRef.current
       const blurK = blurIntensityRef.current
       const vPps = flowVelocityRef.current
-      const brI = breathIntensityRef.current
-      const brHz = breathHzRef.current
+      const baseBrI = breathIntensityRef.current
+      const baseBrHz = breathHzRef.current
       const fkI = flickerIntensityRef.current
       const sharpBoost = sharpPhotonBoostRef.current
 
@@ -485,6 +524,22 @@ export function PhotonModule() {
       ctx.fillRect(0, 0, w, h)
 
       const glowSpread = 1.12 + blurK * 1.85
+
+      // ── AISA 频谱解析：低频控亮度，高频控闪烁节奏（WebKit 同） ──
+      if (audioEnabledRef.current && fftBufRef.current) {
+        getFloatFrequencyData(fftBufRef.current)
+        const buf = fftBufRef.current
+        let bassSum = 0
+        for (let b = 2; b <= 18; b++) bassSum += Math.max(0, buf[b] + 100)
+        audioBassRef.current = bassSum / 17 / 95
+        let trebleSum = 0
+        for (let b = 40; b <= 90; b++) trebleSum += Math.max(0, buf[b] + 100)
+        audioTrebleRef.current = trebleSum / 51 / 95
+      }
+      const audioBoost = 1 + audioBassRef.current * 0.45
+      const audioPitch = 1 + audioTrebleRef.current * 0.55
+      const brI = Math.min(1, baseBrI * audioBoost)
+      const brHz = baseBrHz * audioPitch
 
       // 仅用于 WebKit 路径：预渲染 sprite
       const desiredKey = `${H}|${Lb}|${Math.round(glowSpread * 1000) / 1000}`
@@ -833,6 +888,41 @@ export function PhotonModule() {
             className="w-full"
             style={{ accentColor: 'white' }}
           />
+        </div>
+
+        {/* AISA 音频联动开关：点击激活麦克风，FFT 驱动粒子 */}
+        <div>
+          <button
+            type="button"
+            onClick={async () => {
+              if (!audioEnabled) {
+                // 初始化 FFT 缓冲区（一次性分配，复用）
+                if (!fftBufRef.current) {
+                  fftBufRef.current = new Float32Array(2048)
+                }
+                await connectMicrophone()
+                setAudioEnabled(true)
+              } else {
+                disconnectMicrophone()
+                audioBassRef.current = 0
+                audioTrebleRef.current = 0
+                setAudioEnabled(false)
+              }
+            }}
+            className="w-full rounded border py-1.5 px-2 text-center text-[10px] font-ui transition-colors"
+            style={{
+              borderColor: audioEnabled ? '#00FFCC' : btnBorder,
+              color: audioEnabled ? '#00FFCC' : textColorPanel,
+              background: audioEnabled ? 'rgba(0,255,204,0.08)' : 'transparent',
+            }}
+          >
+            {audioEnabled ? 'AUDIO ON · MIC ACTIVE' : 'AUDIO OFF · TAP TO ENABLE'}
+          </button>
+          {audioEnabled && (
+            <div className="mt-1 text-center text-[9px]" style={{ color: 'rgba(0,255,204,0.55)' }}>
+              BASS {(audioBassRef.current * 100).toFixed(0)}% · TREBLE {(audioTrebleRef.current * 100).toFixed(0)}%
+            </div>
+          )}
         </div>
 
         <GlobalShortcutsHint color="rgba(255,255,255,0.45)" />

@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
-import { motion } from 'framer-motion'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import * as Tone from 'tone'
 import { FluidShaderCanvas } from './FluidShader'
 import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 
@@ -36,9 +36,6 @@ const GRAYSCALE_COLORS = Array.from({ length: GRAYSCALE_STEPS }, (_, i) => {
 
 const BAR_TRANSITION = 'background-color 0.2s linear'
 
-// 默认测试词组
-const DEFAULT_TEXT = 'AUDIO-VISUAL STUDIO'
-
 /** 字体加载检测 - 简化版，直接返回true因为我们用SVG Logo不需要加载字体 */
 function useFontLoaded() {
   return true
@@ -46,7 +43,6 @@ function useFontLoaded() {
 
 export function IndustrialTypoModule({ fontFamily }) {
   const [fontWeight, setFontWeight] = useState(100)
-  const [tracking, setTracking] = useState(0)
   const [invertColors, setInvertColors] = useState(false)
   const [colorTestMode, setColorTestMode] = useState('fluid') // 'none' | 'smpte' | 'grayscale' | 'fluid'，默认 fluid
   const [bottomLogoColor, setBottomLogoColor] = useState('#000000') // 下半部分 Logo 颜色
@@ -55,27 +51,291 @@ export function IndustrialTypoModule({ fontFamily }) {
   const [liveTime, setLiveTime] = useState(0) // 实时计时（秒），用于左下角速率/频率类显示
   const fontLoaded = useFontLoaded()
 
-  // 实时计时：每 100ms 更新，供左下角显示
-  const liveStartRef = useRef(performance.now() / 1000)
+  // ════════════════════════════════════════════════════════════════════════
+  // AISA × FASCA 规范：Tone.js 双合成器 + 十字渐变音频系统
+  // ─ 示波器模式（上部）：FMSynth 离散扫描滴声
+  // ─ 流体模式（下部）：AMSynth 调幅 Drone + LFO 呼吸滤波
+  // ─ 鼠标 Y 位置控制两极 Crossfade
+  // ════════════════════════════════════════════════════════════════════════
+
+  const [audioInitialized, setAudioInitialized] = useState(false)
+  const [audioWanted, setAudioWanted] = useState(true)
+  const [oscVol, setOscVol] = useState(0) // 实时显示用
+  const [fluidVol, setFluidVol] = useState(0)
+
+  // Tone.js 合成器实例（ref，effect 外创建）
+  const fmSynthRef = useRef(null)
+  const amSynthRef = useRef(null)
+  const fluidFilterRef = useRef(null)
+  const fluidLFORef = useRef(null)
+  const oscPannerRef = useRef(null)
+  const oscGainRef = useRef(null)
+  const fluidGainRef = useRef(null)
+  const masterGainRef = useRef(null)
+  const audioInitializedRef = useRef(false)
+  const rafIdRef = useRef(null)
+  const tickCounterRef = useRef(0)
+  const mouseYRef = useRef(0.5) // 0=top, 1=bottom
+  const mouseXRef = useRef(0.5) // 0=left, 1=right
+  const tickIntervalRef = useRef(null)
+
+  // 初始化所有合成器（首次用户交互后调用）
+  const initAudio = useCallback(async () => {
+    if (audioInitializedRef.current) return
+
+    // 先创建节点，触发 Tone.js 创建 AudioContext（此时为 suspended）
+    const master = new Tone.Gain(0.92).toDestination()
+    masterGainRef.current = master
+
+    // ── 示波器滴声：FMSynth（调频合成，金属质感）──────────────────
+    const oscGain = new Tone.Gain(0.0).connect(master)
+    oscGainRef.current = oscGain
+    const oscPan = new Tone.Panner(0).connect(oscGain)
+    oscPannerRef.current = oscPan
+    const fm = new Tone.FMSynth({
+      harmonicity: 3.5,
+      modulationIndex: 8,
+      oscillator: { type: 'sine' },
+      envelope: {
+        attack: 0.001,
+        decay: 0.04,    // 短促
+        sustain: 0,
+        release: 0.06,
+      },
+      modulationEnvelope: {
+        attack: 0.001,
+        decay: 0.02,
+        sustain: 0,
+        release: 0.03,
+      },
+    }).connect(oscPan)
+    fmSynthRef.current = fm
+
+    // ── 流体 Drone：AMSynth 调幅合成 + LFO 呼吸滤波器 ───────────
+    const fGain = new Tone.Gain(0.0).connect(master)
+    fluidGainRef.current = fGain
+    const fluidFilter = new Tone.Filter({
+      type: 'lowpass',
+      frequency: 400,
+      Q: 3.5,
+    }).connect(fGain)
+    fluidFilterRef.current = fluidFilter
+    const am = new Tone.AMSynth({
+      harmonicity: 0.25,
+      modulationIndex: 12,
+      oscillator: { type: 'triangle' },
+      envelope: {
+        attack: 0.4,
+        decay: 0.2,
+        sustain: 0.85,
+        release: 1.8,
+      },
+      modulationEnvelope: {
+        attack: 0.3,
+        decay: 0.4,
+        sustain: 0.7,
+        release: 1.2,
+      },
+    })
+    amSynthRef.current = am
+    // LFO：控制滤波器截止频率在 180-700Hz 之间呼吸
+    const lfo = new Tone.LFO({
+      frequency: 0.18,  // 0.18Hz ≈ 5.5s 一周期
+      min: 180,
+      max: 700,
+    }).connect(fluidFilter.frequency)
+    fluidLFORef.current = lfo
+    am.connect(fluidFilter)
+
+    // 必须在用户手势中调用 Tone.start()，再启动 LFO/触发音源，避免 suspended 警告
+    try {
+      await Tone.start()
+      const ctx = Tone.getContext()
+      if (ctx.state !== 'running') await ctx.resume()
+    } catch (e) {
+      console.warn('[AISA] Tone.start failed:', e)
+      return
+    }
+
+    lfo.start()
+    // Drone 作为底层持续音源，靠 crossfade/gain 控制可听占比
+    // 轻微抬高 Fluid 基频，让低频感稍微更高一些
+    am.triggerAttack(124)
+
+    // 真实音频引擎状态：驱动后续 RAF crossfade/tick 逻辑
+    audioInitializedRef.current = true
+    setAudioInitialized(true)
+  }, [])
+
+  // 触发示波器滴声（周期约 550ms，由 CSS animateMotion 周期决定）
+  const triggerTick = (mouseY) => {
+    const fm = fmSynthRef.current
+    if (!fm) return
+    // Y 越靠上 → 音高越高（280-900Hz）
+    const baseFreq = 280 + (1 - mouseY) * 620
+    // ±大二度范围内随机偏移，模拟不规则扫描
+    const freq = baseFreq * (1 + (Math.random() - 0.5) * 0.06)
+    // X 位置控制声像（左右）
+    if (oscPannerRef.current) {
+      oscPannerRef.current.pan.rampTo((mouseXRef.current - 0.5) * 2, 0.02)
+    }
+    fm.triggerAttackRelease(freq, 0.05)
+  }
+
+  // 清除所有音频资源
+  const disposeAudio = () => {
+    if (tickIntervalRef.current) clearInterval(tickIntervalRef.current)
+    if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current)
+    fmSynthRef.current?.dispose()
+    try {
+      amSynthRef.current?.triggerRelease()
+    } catch {
+      /* */
+    }
+    amSynthRef.current?.dispose()
+    fluidFilterRef.current?.dispose()
+    fluidLFORef.current?.dispose()
+    oscPannerRef.current?.dispose()
+    oscGainRef.current?.dispose()
+    fluidGainRef.current?.dispose()
+    masterGainRef.current?.dispose()
+    fmSynthRef.current = null
+    amSynthRef.current = null
+    fluidFilterRef.current = null
+    fluidLFORef.current = null
+    oscPannerRef.current = null
+    oscGainRef.current = null
+    fluidGainRef.current = null
+    masterGainRef.current = null
+    audioInitializedRef.current = false
+  }
+
+  // 切换离开 studio 模式时，确保声音立即停止
   useEffect(() => {
+    return () => {
+      disposeAudio()
+    }
+  }, [])
+
+  // Studio 模式默认开声：页面已激活则立即播，否则首次手势自动补开
+  useEffect(() => {
+    let disposed = false
+    const tryInit = async () => {
+      if (disposed || !audioWanted || audioInitializedRef.current) return
+      try {
+        await initAudio()
+      } catch {
+        /* */
+      }
+    }
+    const onFirstGesture = () => {
+      if (!audioWanted || audioInitializedRef.current) return
+      void tryInit()
+    }
+
+    const userActivation = navigator.userActivation
+    if (userActivation?.hasBeenActive) {
+      void tryInit()
+    } else if (audioWanted && !audioInitializedRef.current) {
+      window.addEventListener('pointerdown', onFirstGesture, { once: true, passive: true })
+      window.addEventListener('keydown', onFirstGesture, { once: true })
+    }
+
+    return () => {
+      disposed = true
+      window.removeEventListener('pointerdown', onFirstGesture)
+      window.removeEventListener('keydown', onFirstGesture)
+    }
+  }, [audioWanted, initAudio])
+
+  // 鼠标位置监听（控制 Crossfade）
+  useEffect(() => {
+    const container = document.getElementById('industrial-typo-root')
+    if (!container) return
+    const handleMouseMove = (e) => {
+      const rect = container.getBoundingClientRect()
+      const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
+      const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height))
+      mouseXRef.current = x
+      mouseYRef.current = y
+    }
+    container.addEventListener('mousemove', handleMouseMove)
+    return () => container.removeEventListener('mousemove', handleMouseMove)
+  }, [])
+
+  // 主音频循环（RAF + Crossfade + LFO 频率跟随 hue drift）
+  useEffect(() => {
+    if (!audioInitializedRef.current) return
+
+    const T = 50 // ms
+
+    const tickRaf = () => {
+      tickCounterRef.current = (tickCounterRef.current + 1) || 0
+
+      const mouseY = mouseYRef.current
+      // Crossfade 曲线：mouseY=0(top) → fluid=0, osc=1；mouseY=1(bottom) → fluid=1, osc=0
+      // 使用 smoothstep 曲线避免硬切换
+      const t = Math.max(0, Math.min(1, mouseY))
+      const crossfade = t * t * (3 - 2 * t) // smoothstep
+      const fluidWeight = crossfade   // 0=top(osc), 1=bottom(fluid)
+      const oscWeight = 1 - fluidWeight
+
+      // RAF 驱动音量（5ms 过渡，防止爆破音）
+      if (oscGainRef.current) {
+        oscGainRef.current.gain.rampTo(oscWeight * 0.55, 0.005)
+      }
+      if (fluidGainRef.current) {
+        fluidGainRef.current.gain.rampTo(fluidWeight * 0.35, 0.005)
+      }
+
+      // 更新显示
+      setOscVol(oscWeight)
+      setFluidVol(fluidWeight)
+
+      // 示波器滴声：每 ~9 帧触发一次（≈ 150ms @ 60fps，与 animateMotion 4.2s 周期近似同步）
+      if (tickCounterRef.current % 9 === 0 && oscWeight > 0.05) {
+        triggerTick(mouseY)
+      }
+
+      // LFO 频率跟随 hue drift 速率（hue 越快 → LFO 越快 → 呼吸越急促）
+      const driftRate = 14 // HUE_DRIFT_DPS
+      const lfoFreq = 0.12 + (driftRate / 14) * 0.45  // 0.12-0.57Hz
+      if (fluidLFORef.current) {
+        fluidLFORef.current.frequency.rampTo(lfoFreq, T / 1000 * 2)
+      }
+
+      rafIdRef.current = requestAnimationFrame(tickRaf)
+    }
+
+    rafIdRef.current = requestAnimationFrame(tickRaf)
+    return () => {
+      if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current)
+    }
+  }, [audioInitialized])
+
+  // 音频开启/关闭：默认希望为开启状态
+  const toggleAudio = async () => {
+    if (audioInitializedRef.current) {
+      disposeAudio()
+      setAudioInitialized(false)
+      setOscVol(0)
+      setFluidVol(0)
+      setAudioWanted(false)
+    } else {
+      setAudioWanted(true)
+      await initAudio()
+    }
+  }
+
+  // 实时计时：每 100ms 更新，供左下角显示
+  const liveStartRef = useRef(0)
+  useEffect(() => {
+    liveStartRef.current = performance.now() / 1000
     const t = setInterval(() => {
       setLiveTime(((performance.now() / 1000) - liveStartRef.current))
     }, 100)
     return () => clearInterval(t)
   }, [])
-
-  const fontStack = fontFamily ?? 'Inter, sans-serif'
-
-  // 读取 settings.json 的文字内容
-  const [typoText] = useState(() => {
-    try {
-      return window.__AV_STUDIO_SETTINGS?.screensaver?.text
-        || window.__AV_STUDIO_SETTINGS?.modes?.typoTest?.content
-        || DEFAULT_TEXT
-    } catch {
-      return DEFAULT_TEXT
-    }
-  })
 
   // 动态粗细：点击切换 100 <-> 900
   useEffect(() => {
@@ -98,17 +358,6 @@ export function IndustrialTypoModule({ fontFamily }) {
       window.removeEventListener('click', handleClick)
       window.removeEventListener('keydown', handleKey)
     }
-  }, [])
-
-  // 动态 tracking
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setTracking((prev) => {
-        const delta = Math.random() > 0.5 ? 0.01 : -0.01
-        return Math.max(-0.1, Math.min(0.2, prev + delta))
-      })
-    }, 100)
-    return () => clearInterval(interval)
   }, [])
 
   // 背景和文字颜色
@@ -143,12 +392,6 @@ export function IndustrialTypoModule({ fontFamily }) {
     pointerEvents: 'none',
   }
 
-  // SVG Logo 样式
-  const logoStyle = {
-    width: 'clamp(200px, 50vw, 500px)',
-    height: 'auto',
-  }
-
   // 字体未加载时显示Loading
   if (!fontLoaded) {
     return (
@@ -163,10 +406,11 @@ export function IndustrialTypoModule({ fontFamily }) {
   }
 
   return (
-    <div 
+    <div
+      id="industrial-typo-root"
       className="w-full h-full flex flex-col relative cursor-pointer"
-      style={containerStyle}
-      onClick={() => setBottomLogoColor(c => c === '#000000' ? '#FFFFFF' : '#000000')}
+      style={{ ...containerStyle, fontFamily: fontFamily ?? 'Inter, sans-serif' }}
+      onClick={() => setBottomLogoColor((c) => c === '#000000' ? '#FFFFFF' : '#000000')}
     >
       {/* 左上角 - 色值 + 走马灯速率，小字固定白+描边始终可见 */}
       <div className="absolute top-4 left-4 font-mono z-[30]" style={labelStyle}>
@@ -272,6 +516,37 @@ export function IndustrialTypoModule({ fontFamily }) {
                 </svg>
               )}
             </button>
+            {/* FASCA+AISA 音频系统：Tone.js 双合成器 + 十字渐变 */}
+            <button
+              onClick={toggleAudio}
+              className="flex items-center justify-center w-8 h-8 rounded transition-all"
+              style={{
+                backgroundColor: audioInitialized
+                  ? (oscVol > fluidVol ? 'rgba(0,200,255,0.15)' : 'rgba(255,120,0,0.15)')
+                  : 'rgba(0,0,0,0.6)',
+                border: `1px solid ${
+                  audioInitialized
+                    ? (oscVol > fluidVol ? 'rgba(0,200,255,0.6)' : 'rgba(255,120,0,0.6)')
+                    : 'rgba(255,255,255,0.2)'
+                }`,
+              }}
+              title={
+                audioInitialized
+                  ? '点击关闭音频'
+                  : '音频 OFF · 点击开启（Tone.js 合成器）'
+              }
+              aria-label={audioInitialized ? '关闭音频' : '开启音频'}
+            >
+              {audioInitialized ? (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style={{ color: oscVol > fluidVol ? '#00C8FF' : '#FF7800' }}>
+                  <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 7.97v8.05c1.35-.48 2.5-1.5 2.5-3.02z"/>
+                </svg>
+              ) : (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style={{ color: 'rgba(255,255,255,0.4)' }}>
+                  <path d="M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 003.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
+                </svg>
+              )}
+            </button>
           </div>
         </div>
 
@@ -301,9 +576,16 @@ export function IndustrialTypoModule({ fontFamily }) {
         <GlobalShortcutsHint variant="inline" color="rgba(140,140,140,0.9)" />
       </div>
 
-      {/* 右下角 - 色彩模式（灰色注释） */}
+      {/* 右下角 - 色彩模式 + 音频状态 */}
       <div className="absolute bottom-[52%] right-4 font-mono text-right z-[30]" style={labelStyle}>
         <div title="下半区色彩模式 Color test mode">COLOR · Mode: {colorTestMode}</div>
+        {audioInitialized && (
+          <div style={{ color: oscVol > fluidVol ? 'rgba(0,200,255,0.6)' : 'rgba(255,120,0,0.6)' }}>
+            {oscVol > fluidVol
+              ? `OSCi ◇ ${(oscVol * 100).toFixed(0)}%`
+              : `FLUID ◇ ${(fluidVol * 100).toFixed(0)}%`}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -428,7 +710,7 @@ function GrayscaleCreepBars({ speed = 1, paused = false }) {
 // ==================== 示波器追踪 Logo 组件 ====================
 function OscilloscopeLogo({ invertColors, triggerGlitch }) {
   const svgRef = useRef(null)
-  const [pathLengths, setPathLengths] = useState([])
+  const pathLengths = Array.from({ length: 16 }, (_, i) => 500 + ((i * 97) % 500))
   const [glitchActive, setGlitchActive] = useState(false)
   const [jitterOffset, setJitterOffset] = useState({ x: 0, y: 0 })
   
@@ -455,11 +737,6 @@ function OscilloscopeLogo({ invertColors, triggerGlitch }) {
     "M182.33,45.55c-1.13,3.03-3.02,8.11-4.57,8.11s-3.43-5.08-4.56-8.11c-2.06-5.55-4.41-11.85-9.93-11.85-5.31,0-7.6,4.6-9.28,7.96-1.62,3.26-2.56,4.79-4.15,4.79s-2.71-1.57-4.55-4.9c-1.03-1.86-2.21-3.94-3.85-5.5-2.53-2.76-6.31-4.37-10.87-4.37-8.61,0-14.41,5.55-14.41,13.8,0,8.3,5.81,13.9,14.41,13.9,6.88,0,11.98-3.66,13.69-9.45,1.43,1.32,3.21,2.24,5.59,2.24,5.31,0,7.6-4.6,9.28-7.96,1.62-3.26,2.56-4.79,4.15-4.79s3.43,5.08,4.56,8.11c2.06,5.55,4.41,11.85,9.93,11.85s7.87-6.29,9.94-11.85c1.13-3.03,3.02-8.11,4.57-8.11v-5.73c-5.53,0-7.87,6.29-9.94,11.85Z",
   ]
   
-  useEffect(() => {
-    const lengths = logoPaths.map(() => 500 + Math.random() * 500)
-    setPathLengths(lengths)
-  }, [])
-  
   // 信号震动
   useEffect(() => {
     const interval = setInterval(() => {
@@ -472,9 +749,12 @@ function OscilloscopeLogo({ invertColors, triggerGlitch }) {
   }, [])
   
   useEffect(() => {
-    setGlitchActive(true)
-    const timer = setTimeout(() => setGlitchActive(false), 400)
-    return () => clearTimeout(timer)
+    const startId = setTimeout(() => setGlitchActive(true), 0)
+    const stopId = setTimeout(() => setGlitchActive(false), 400)
+    return () => {
+      clearTimeout(startId)
+      clearTimeout(stopId)
+    }
   }, [triggerGlitch])
 
   return (

@@ -4,17 +4,8 @@ import { RippleButton } from './RippleButton'
 import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
 import { TypoSynthMode } from './TypoSynthMode'
-import { AUDIO_GRID_F0 } from './audioGridMap'
-
-/** Scale-invariant Typo-Synth 音高/列映射（实现见 audioGridMap.js） */
-export {
+import {
   AUDIO_GRID_F0,
-  AUDIO_GRID_GHOST_MS,
-  computePitchHz,
-  computeColNorm,
-  computeRowNorm,
-  computePanFromColNorm,
-  computeDetuneCentsFromColNorm,
 } from './audioGridMap'
 
 // Display-P3 广色域
@@ -62,6 +53,7 @@ const PALETTE_SRGB = Object.values(SRGB)
 const BFI_DURATION_MIN = 50
 const BFI_DURATION_MAX = 1000
 const BFI_INTERVAL_MS = 5000 // 闪黑测试间隔
+const MotionDiv = motion.div
 
 // 纯色自检：1=白 2=黑 3=红 4=绿 5=5%灰 6=蓝 7=18%中性灰 (全量色彩矩阵)
 const UNIFORMITY_COLORS = [
@@ -140,7 +132,7 @@ function BitDepthCanvas({ dither, className }) {
 }
 
 /** 动力学排版文字 - 水平位移+边缘变色 */
-function KineticCell({ cell, fontFamily, onClick, palette }) {
+function KineticCell({ cell, onClick, palette }) {
   const [offset, setOffset] = useState(0)
   const [textColor, setTextColor] = useState(palette[6]) // white
   const [isHovered, setIsHovered] = useState(false)
@@ -176,7 +168,7 @@ function KineticCell({ cell, fontFamily, onClick, palette }) {
   }, [cell.textSpeed, cell.textDirection])
 
   return (
-    <motion.div
+    <MotionDiv
       className="relative overflow-hidden flex items-center justify-center outline-none focus:outline-none"
       style={{ backgroundColor: displayColor, outline: 'none' }}
       initial={{ opacity: 0 }}
@@ -218,7 +210,7 @@ function KineticCell({ cell, fontFamily, onClick, palette }) {
           {cell.char}
         </span>
       )}
-    </motion.div>
+    </MotionDiv>
   )
 }
 
@@ -226,7 +218,7 @@ function KineticCell({ cell, fontFamily, onClick, palette }) {
 function SolidCell({ cell, onClick, palette }) {
   const [displayColor, setDisplayColor] = useState(() => cell.color)
   return (
-    <motion.div
+    <MotionDiv
       className="flex items-center justify-center cursor-pointer outline-none focus:outline-none relative overflow-hidden"
       style={{ backgroundColor: displayColor, outline: 'none' }}
       initial={{ opacity: 0 }}
@@ -235,7 +227,7 @@ function SolidCell({ cell, onClick, palette }) {
       onMouseEnter={() => setDisplayColor(pickRandomColor(palette))}
       onClick={onClick}
     >
-    </motion.div>
+    </MotionDiv>
   )
 }
 
@@ -244,9 +236,9 @@ function useFontLoaded(fontFamily) {
   const [isLoaded, setIsLoaded] = useState(false)
 
   useEffect(() => {
-    setIsLoaded(false)
+    queueMicrotask(() => setIsLoaded(false))
     if (!fontFamily || fontFamily === 'var(--font-stack-sans)') {
-      setIsLoaded(true)
+      queueMicrotask(() => setIsLoaded(true))
       return
     }
     if (document.fonts) {
@@ -352,7 +344,8 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
 
   // 右上角热区或悬停在设置面板上时保持显示（避免拖滑块移出角落后面板消失/无法操作）
   useEffect(() => {
-    const threshold = 60
+    // 收紧唤出热区：仅在更靠近右上角的小区域触发
+    const threshold = 28
     let hideTimeout = null
     const handleMouseMove = (e) => {
       const isInCorner = e.clientX > window.innerWidth - threshold && e.clientY < threshold
@@ -399,8 +392,10 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
   useEffect(() => {
     if (autoCycle) return
     const n = Math.max(GRID_SIZE_MIN, Math.min(GRID_SIZE_MAX, gridSizeNum))
-    setGridSize({ rows: n, cols: n })
-    setCells(generateGrid(n, n, palette))
+    queueMicrotask(() => {
+      setGridSize({ rows: n, cols: n })
+      setCells(generateGrid(n, n, palette))
+    })
   }, [autoCycle, gridSizeNum, palette])
 
   // 自由轮播：定时在 1×1 到 gridSizeNum×gridSizeNum 之间随机切换
@@ -417,16 +412,20 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
 
   // 色彩空间切换时重新生成网格
   useEffect(() => {
-    setCells(generateGrid(gridSize.rows, gridSize.cols, palette))
+    queueMicrotask(() => {
+      setCells(generateGrid(gridSize.rows, gridSize.cols, palette))
+    })
   }, [colorSpace, gridSize, palette])
 
   // 进入 COLOR OFFSET 或 纯色/色深测试 时：自动关闭 BFI，暂停轮播（与 COLOR OFFSET 一致）
   const inTestOrOffsetMode = colorOffsetMode || !!gridTestMode || typoSynthMode
   useEffect(() => {
     if (inTestOrOffsetMode) {
-      setBfiEnabled(false)
-      setAutoCycle(false)
-      onAutoPlayChange?.(false)
+      queueMicrotask(() => {
+        setBfiEnabled(false)
+        setAutoCycle(false)
+        onAutoPlayChange?.(false)
+      })
     } else {
       onAutoPlayChange?.(true)
     }
@@ -442,7 +441,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
   // 切换档位时默认选中 R，上下键只控制当前档位（low/mid/high）的 R/G/B
   useEffect(() => {
     if (!colorOffsetMode) return
-    setActiveOffsetAxis(0)
+    queueMicrotask(() => setActiveOffsetAxis(0))
   }, [colorOffsetMode, calibrationLevel])
 
   // COLOR OFFSET 内： [ ] 切换档位；↑/↓ 对当前档位（calibrationLevel）的 R/G/B ±1，无焦点时默认调 R
@@ -519,7 +518,7 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
   // 仅 Grid 内：周期性闪黑测试（BFI）；Typo-Synth 全屏时关闭
   useEffect(() => {
     if (!bfiEnabled || typoSynthMode) {
-      setBfiActive(false)
+      queueMicrotask(() => setBfiActive(false))
       return
     }
     let timeoutId = null
@@ -923,7 +922,6 @@ export function GridModule({ fontFamily, onModuleChange, onAutoPlayChange }) {
               <KineticCell
                 key={`${gridSize.rows}-${gridSize.cols}-${i}`}
                 cell={cell}
-                fontFamily={fontStack}
                 palette={palette}
                 onClick={() => onModuleChange?.('color')}
               />

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
 import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 
@@ -185,7 +185,7 @@ const ALL_FONT_STYLES = [
 ]
 
 /** 横向滚动文字行 - CSS Animation 无限滚动 */
-function ScrollingTextRow({ text, speed, fontFamily, category, style, weight, color, forceInvert, speedMultiplier = 1, colorMode = 'bw', rowBgColor, isFirstRow = false, wavyEdge = true, waveStripColor }) {
+function ScrollingTextRow({ text, speed, fontFamily, category, style, weight, color, forceInvert, speedMultiplier = 1, colorMode = 'bw', rowBgColor }) {
   const rowRef = useRef(null)
   const [isInverted, setIsInverted] = useState(false)
   const effectiveSpeed = speed * speedMultiplier
@@ -221,7 +221,14 @@ function ScrollingTextRow({ text, speed, fontFamily, category, style, weight, co
     return () => window.removeEventListener('scroll', handleScroll)
   }, [forceInvert])
 
-  const scaleFactor = useMemo(() => SCALE_OPTIONS[Math.floor(Math.random() * SCALE_OPTIONS.length)], [])
+  const scaleFactor = useMemo(() => {
+    const seed = `${text}-${fontFamily}-${category}-${weight}`
+    let hash = 0
+    for (let i = 0; i < seed.length; i++) {
+      hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0
+    }
+    return SCALE_OPTIONS[Math.abs(hash) % SCALE_OPTIONS.length]
+  }, [text, fontFamily, category, weight])
   const scaleLabel = `${Math.round(scaleFactor * 100)}%`
   // 比例小时多重复几段文字，避免右侧大片空白
   const repeatCount = useMemo(() => Math.max(3, Math.ceil(3 / scaleFactor)), [scaleFactor])
@@ -300,6 +307,7 @@ function ScrollingTextRow({ text, speed, fontFamily, category, style, weight, co
       </div>
       
       <style>{`
+        /* FASCA 规范：所有滚动动画使用 translate3d 确保 GPU 加速，避免触发 Reflow */
         @keyframes scroll-left-3 { from { transform: translateX(0); } to { transform: translateX(-33.333%); } }
         @keyframes scroll-left-4 { from { transform: translateX(0); } to { transform: translateX(-25%); } }
         @keyframes scroll-left-6 { from { transform: translateX(0); } to { transform: translateX(-16.666%); } }
@@ -310,7 +318,7 @@ function ScrollingTextRow({ text, speed, fontFamily, category, style, weight, co
 }
 
 /** Logo 行：单枚 Logo 固定居中，尺寸适中 */
-function ScrollingLogoRow({ colorMode = 'bw', rowBgColor, forceInvert, waveStripColor }) {
+function ScrollingLogoRow({ colorMode = 'bw', rowBgColor, forceInvert }) {
   const rowRef = useRef(null)
   const [isInverted, setIsInverted] = useState(false)
   const isColor = colorMode === 'color' && rowBgColor
@@ -462,7 +470,9 @@ function PursuitModeView({ speedPps, scale, shadowPx }) {
   const rafRef = useRef(null)
   const logoRef = useRef(null)
   const speedPpsRef = useRef(speedPps)
-  speedPpsRef.current = speedPps
+  useEffect(() => {
+    speedPpsRef.current = speedPps
+  }, [speedPps])
 
   useEffect(() => {
     startTimeRef.current = performance.now()
@@ -481,6 +491,7 @@ function PursuitModeView({ speedPps, scale, shadowPx }) {
       const elapsedSec = (now - start) / 1000
       const pps = speedPpsRef.current
       const positionPx = (elapsedSec * pps) % trackWidth
+      // FASCA 规范：translate3d 强制 GPU 渲染，禁用 FF/Chrome 线程合成的光栅化步骤
       logoWrapperRef.current.style.transform = `translate3d(${-positionPx}px, 0, 0)`
       rafRef.current = requestAnimationFrame(tick)
     }
@@ -635,15 +646,18 @@ export function ScrollTestModule() {
   const shuffledColorPalette = useMemo(() => shuffleArray(MUTED_PALETTE), [colorSeed])
 
   useEffect(() => {
-    const sansOnly = ALL_FONT_STYLES.filter((s) => s.category === 'Sans')
-    const pool = [...ALL_FONT_STYLES, ...sansOnly, ...ALL_FONT_STYLES]
-    const shuffled = pool.sort(() => Math.random() - 0.5)
-    setShuffledFonts(shuffled)
-    const n = shuffled.length
-    const idx1 = Math.floor(Math.random() * n)
-    let idx2 = Math.floor(Math.random() * n)
-    while (idx2 === idx1 && n > 1) idx2 = Math.floor(Math.random() * n)
-    setLogoRowIndices(new Set([idx1, idx2]))
+    const timer = setTimeout(() => {
+      const sansOnly = ALL_FONT_STYLES.filter((s) => s.category === 'Sans')
+      const pool = [...ALL_FONT_STYLES, ...sansOnly, ...ALL_FONT_STYLES]
+      const shuffled = pool.sort(() => Math.random() - 0.5)
+      setShuffledFonts(shuffled)
+      const n = shuffled.length
+      const idx1 = Math.floor(Math.random() * n)
+      let idx2 = Math.floor(Math.random() * n)
+      while (idx2 === idx1 && n > 1) idx2 = Math.floor(Math.random() * n)
+      setLogoRowIndices(new Set([idx1, idx2]))
+    }, 0)
+    return () => clearTimeout(timer)
   }, [])
 
   // Pursuit Mode 内：[ ] 速度；+ - 缩放；← → 虚拟阴影长度 (量化拖影)
@@ -799,7 +813,7 @@ export function ScrollTestModule() {
             }}
           >
             {renderOneContent('a')}
-            <div style={{ marginTop: -1 }}>{renderOneContent('b')}</div>
+            <div style={{ transform: 'translateY(-1px)' }}>{renderOneContent('b')}</div>
           </div>
         </>
       )}
@@ -892,6 +906,7 @@ export function ScrollTestModule() {
       </div>
 
       <style>{`
+        /* GPU 加速：translateY 而非 top/margin */
         @keyframes scroll-vertical {
           from { transform: translateY(0); }
           to { transform: translateY(-50%); }

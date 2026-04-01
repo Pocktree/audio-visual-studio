@@ -3,11 +3,7 @@
  * 键帽点击通过 window 自定义事件与键盘 F / P 行为一致。
  */
 
-/** 与 App.jsx 中监听器名称一致 */
-export const AVS_KEYCAP_EVENTS = {
-  fullscreen: 'avs-keycap-fullscreen',
-  carousel: 'avs-keycap-carousel',
-}
+import { AVS_KEYCAP_EVENTS } from '../constants/events'
 
 const KEY_GRAY = '#888888'
 

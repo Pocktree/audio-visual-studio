@@ -82,7 +82,6 @@ const WATER_BLUE_PALETTE = [
 /** RainTestModule - 工业极简主义雨滴效果 */
 export function RainTestModule() {
   const canvasRef = useRef(null)
-  const animationRef = useRef(null)
   const linesRef = useRef([])
   const speedRef = useRef(5)
   const densityRef = useRef(50)
@@ -452,11 +451,7 @@ export function RainTestModule() {
       const bgColor = isLight ? '#FFFFFF' : '#000000'
       const gridColor = isWater ? 'rgba(255, 182, 193, 0.35)' : (isLight ? 'rgba(0,0,0,0.1)' : 'rgba(255,255,255,0.1)')
       const textColor = isLight ? 'rgba(0,0,0,0.7)' : 'rgba(255,255,255,0.7)'
-      const panelBg = isLight ? 'rgba(255,255,255,0.95)' : 'rgba(0,0,0,0.85)'
-      const panelBorder = isLight ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.2)'
-      const btnBorder = isLight ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.3)'
-      const btnActive = isLight ? 'rgba(0,0,0,0.9)' : 'rgba(255,255,255,0.9)'
-      
+
       // 清除画布（逻辑坐标 w×h，与 scale(dpr) 及 30px 网格一致）
       ctx.fillStyle = bgColor
       ctx.fillRect(0, 0, w, h)

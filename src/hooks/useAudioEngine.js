@@ -394,6 +394,20 @@ export function useAudioEngine() {
     }
   }, [])
 
+  /**
+   * 直接设置主低通滤波器截止频率（Hz）。
+   * STUDIO 模块用它跟随流体 Shader 活跃度动态调制滤波。
+   */
+  const setMasterFilterFrequency = useCallback((freqHz) => {
+    const ctx = audioContextRef.current
+    const f = masterFilterRef.current
+    if (!ctx || !f) return
+    const clamped = Math.max(20, Math.min(20000, freqHz))
+    const t = ctx.currentTime
+    f.frequency.cancelScheduledValues(t)
+    f.frequency.setTargetAtTime(clamped, t, 0.05)
+  }, [])
+
   const stopSynthOscillators = useCallback(() => {
     const list = synthOscillatorsRef.current
     for (let i = 0; i < list.length; i++) {
@@ -493,6 +507,7 @@ export function useAudioEngine() {
     setSynthGain,
     setMicGain,
     setUnderwaterMuffling,
+    setMasterFilterFrequency,
     setSynthOscillatorCount,
     stopSynthOscillators,
     close,

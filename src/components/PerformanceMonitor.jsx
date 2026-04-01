@@ -7,7 +7,7 @@ import { useState, useEffect, useRef } from 'react'
 export function PerformanceMonitor() {
   const [fps, setFps] = useState(0)
   const [frameTimeMs, setFrameTimeMs] = useState(0)
-  const lastTimeRef = useRef(performance.now())
+  const lastTimeRef = useRef(0)
   const frameTimeAccRef = useRef(0)
   const framesCountRef = useRef(0)
   const rafIdRef = useRef(null)
