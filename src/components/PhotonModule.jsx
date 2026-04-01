@@ -56,6 +56,9 @@ function initParticles(count, cw, ch, sharpRatio) {
       y,
       spawnX: x,
       spawnY: y,
+      offsetX: 0,
+      offsetY: 0,
+      assignedFrequency: 180 + Math.random() * 2200,
       vx: Math.cos(angle),
       vy: Math.sin(angle),
       spdJ,
@@ -101,9 +104,15 @@ export function PhotonModule() {
   const photonLimiterRef = useRef(null)
   const photonWidenerRef = useRef(null)
   const photonMasterRef = useRef(null)
+  const photonMeterRef = useRef(null)
+  const photonFftRef = useRef(null)
   const lastBleepAtRef = useRef(0)
   const lastAmbientBleepAtRef = useRef(0)
   const lastSpawnBurstAtRef = useRef(0)
+  const audioMotionRef = useRef(0)
+  const audioLevelRef = useRef(0)
+  const audioFreqNormRef = useRef(0)
+  const fmIndexRef = useRef(3)
   /** 当前帧的音频派生参数（用于动画循环，不触发 React 重渲染） */
   const audioBassRef = useRef(0)
   const audioTrebleRef = useRef(0)
@@ -151,6 +160,8 @@ export function PhotonModule() {
       }).connect(master)
       const widener = new Tone.StereoWidener(0.11).connect(reverb)
       const limiter = new Tone.Limiter(-6).connect(widener)
+      const meter = new Tone.Meter()
+      const fft = new Tone.FFT(32)
       const synth = new Tone.PolySynth(Tone.FMSynth, {
         maxPolyphony: 6,
         volume: -12,
@@ -170,13 +181,19 @@ export function PhotonModule() {
           sustain: 0,
           release: 0.08,
         },
-      }).connect(limiter)
+      })
+      synth.connect(limiter)
+      synth.connect(meter)
+      synth.connect(fft)
 
       photonMasterRef.current = master
       photonReverbRef.current = reverb
       photonLimiterRef.current = limiter
       photonWidenerRef.current = widener
+      photonMeterRef.current = meter
+      photonFftRef.current = fft
       photonSynthRef.current = synth
+      fmIndexRef.current = 3
       audioReadyRef.current = true
       return true
     } catch {
@@ -204,6 +221,7 @@ export function PhotonModule() {
       const modulationIndex = 2 + e * 2.8
       const harmonicity = 1.7 + s * 0.9
       synth.set({ modulationIndex, harmonicity })
+      fmIndexRef.current = modulationIndex
       synth.triggerAttackRelease(note, '32n', undefined, velocity)
 
       audioTrebleRef.current = Math.max(audioTrebleRef.current, 0.2 + e * 0.8)
@@ -224,6 +242,7 @@ export function PhotonModule() {
       modulationIndex: 2.2 + s * 2.2,
       harmonicity: 1.85 + s * 0.45,
     })
+    fmIndexRef.current = 2.2 + s * 2.2
 
     const now = Tone.now()
     const pool = [...SPAWN_HIGH_POOL]
@@ -448,10 +467,42 @@ export function PhotonModule() {
           triggerPhotonBleep(0.34 + Math.random() * 0.22, 0.35 + Math.random() * 0.28, Math.random())
         }
       }
-      const audioBoost = 1 + audioBassRef.current * 0.45
-      const audioPitch = 1 + audioTrebleRef.current * 0.55
-      const brI = Math.min(1, baseBrI * audioBoost)
-      const brHz = baseBrHz * audioPitch
+      if (audioEnabledRef.current && photonMeterRef.current && photonFftRef.current) {
+        const meterVal = photonMeterRef.current.getValue()
+        const db = Number.isFinite(meterVal) ? meterVal : -120
+        const levelTarget = Math.max(0, Math.min(1, Tone.dbToGain(db) * 2.2))
+        audioLevelRef.current += (levelTarget - audioLevelRef.current) * 0.16
+
+        const fftVals = photonFftRef.current.getValue()
+        let low = 0
+        let high = 0
+        let lowN = 0
+        let highN = 0
+        for (let i = 1; i <= 6 && i < fftVals.length; i++) {
+          low += Math.max(0, (fftVals[i] + 120) / 120)
+          lowN++
+        }
+        for (let i = 10; i <= 24 && i < fftVals.length; i++) {
+          high += Math.max(0, (fftVals[i] + 120) / 120)
+          highN++
+        }
+        const lowAvg = lowN ? low / lowN : 0
+        const highAvg = highN ? high / highN : 0
+        const freqTarget = highAvg / (highAvg + lowAvg + 1e-4)
+        audioFreqNormRef.current += (freqTarget - audioFreqNormRef.current) * 0.14
+      } else {
+        audioLevelRef.current *= 0.96
+        audioFreqNormRef.current *= 0.96
+      }
+      const targetMotion = Math.max(
+        0,
+        Math.min(1, audioTrebleRef.current * 0.9 + audioBassRef.current * 0.35),
+      )
+      audioMotionRef.current += (targetMotion - audioMotionRef.current) * 0.08
+      const motion = audioMotionRef.current
+      const audioBoost = 1 + audioBassRef.current * 0.32
+      const brI = Math.min(1, baseBrI * (0.88 + motion * 0.45) * audioBoost)
+      const brHz = baseBrHz * (0.72 + motion * 0.38)
 
       const tSec = now * 0.001
       const omega = Math.PI * 2 * brHz
@@ -473,12 +524,31 @@ export function PhotonModule() {
         p.breathPhase = Math.random() * Math.PI * 2
         p.flickerPhase = Math.random() * Math.PI * 2
         p.isSharpPhoton = Math.random() < sharpPhotonRatioRef.current
+        p.offsetX = 0
+        p.offsetY = 0
+        p.assignedFrequency = 180 + Math.random() * 2200
         frameRespawns += 1
       }
       for (let i = 0; i < parts.length; i++) {
         const p = parts[i]
         p.x += p.vx * vPps * p.spdJ * dt
         p.y += p.vy * vPps * p.spdJ * dt
+        const amp = audioLevelRef.current
+        const freqNorm = audioFreqNormRef.current
+        const pNorm = Math.max(0.08, Math.min(1.8, (p.assignedFrequency || 600) / 1200))
+        const jitterRate = 0.8 + freqNorm * 8.2 * pNorm
+        const vibAmp = amp * (5 + 14 * pNorm)
+        const targetOx = Math.sin(tSec * jitterRate + (p.breathPhase || 0)) * vibAmp
+        const targetOy = Math.cos(tSec * (jitterRate * 0.83) + (p.flickerPhase || 0)) * vibAmp * 0.72
+        const settle = 0.12 + amp * 0.2
+        p.offsetX = (p.offsetX || 0) + (targetOx - (p.offsetX || 0)) * settle
+        p.offsetY = (p.offsetY || 0) + (targetOy - (p.offsetY || 0)) * settle
+        const microJitter = amp * (0.22 + freqNorm * 1.05) * pNorm
+        p.offsetX += (Math.random() - 0.5) * microJitter
+        p.offsetY += (Math.random() - 0.5) * microJitter
+        const convergence = 0.82 + (1 - amp) * 0.14
+        p.offsetX *= convergence
+        p.offsetY *= convergence
 
         const rawDiff =
           Math.hypot(p.x - p.spawnX, p.y - p.spawnY) / (maxDiff || 1)
@@ -512,8 +582,10 @@ export function PhotonModule() {
 
       for (let i = 0; i < parts.length; i++) {
         const p = parts[i]
+        const drawX = p.x + (p.offsetX || 0)
+        const drawY = p.y + (p.offsetY || 0)
         const diff =
-          Math.hypot(p.x - p.spawnX, p.y - p.spawnY) / (maxDiff || 1)
+          Math.hypot(drawX - p.spawnX, drawY - p.spawnY) / (maxDiff || 1)
         // 扩散距离增长采用 ease-out：先快后慢（d 越小增长越快，d 越大越接近上限）
         const t = Math.max(0, Math.min(1, diff))
         const easedT = 1 - Math.pow(1 - t, SPREAD_EASE_POWER)
@@ -531,18 +603,20 @@ export function PhotonModule() {
           1 -
           brI +
           brI * (0.5 + 0.5 * Math.sin(omega * tSec + (p.breathPhase || 0)))
+        const flickerDepth = Math.min(0.42, fkI * (0.28 + motion * 0.34))
         const flickerWave =
           1 -
-          fkI +
-          fkI * (0.5 + 0.5 * Math.sin(omega * 5.15 * tSec + (p.flickerPhase || 0)))
-        const pulse = Math.max(0.12, breathWave * flickerWave)
+          flickerDepth +
+          flickerDepth * (0.5 + 0.5 * Math.sin(omega * 2.15 * tSec + (p.flickerPhase || 0)))
+        const pulse = Math.max(0.34, breathWave * 0.72 + flickerWave * 0.28)
 
         const a =
           Math.min(1, Ta * (0.4 + 0.55 * alphaBright)) * opacityFade * pulse
+        const fmNorm = Math.max(0, Math.min(1, (fmIndexRef.current - 2) / 4.5))
         const radiusCore = Math.max(0.5, baseSize * sizeMul * 0.48)
         const outerScale = 1 + 4 * easedT
         const radius = radiusCore * outerScale
-        const outer = radius * glowSpread
+        const outer = radius * glowSpread * (1 + fmNorm * 0.18)
 
         if (p.isSharpPhoton) {
           const boost = Math.min(2.4, sharpBoost)
@@ -551,25 +625,33 @@ export function PhotonModule() {
           ctx.strokeStyle = `hsla(${H}, ${SAT_LOCK}%, 96%, ${ac * 0.88})`
           ctx.lineWidth = 0.75
           ctx.beginPath()
-          ctx.moveTo(p.x - gl, p.y)
-          ctx.lineTo(p.x + gl, p.y)
-          ctx.moveTo(p.x, p.y - gl)
-          ctx.lineTo(p.x, p.y + gl)
+          ctx.moveTo(drawX - gl, drawY)
+          ctx.lineTo(drawX + gl, drawY)
+          ctx.moveTo(drawX, drawY - gl)
+          ctx.lineTo(drawX, drawY + gl)
           ctx.stroke()
           ctx.fillStyle = `hsla(${H}, ${SAT_LOCK}%, 100%, ${ac})`
           ctx.beginPath()
-          ctx.arc(p.x, p.y, Math.max(0.65, radiusCore * 0.22), 0, Math.PI * 2)
+          ctx.arc(drawX, drawY, Math.max(0.65, radiusCore * 0.22), 0, Math.PI * 2)
           ctx.fill()
-          const tight = outer * 0.42
+          const tight = outer * (0.38 + fmNorm * 0.08)
           const lightMulS = Math.min(100, Lb + (100 - Lb) * 0.35)
-          const gs = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, tight)
+          const gs = ctx.createRadialGradient(drawX, drawY, 0, drawX, drawY, tight)
           gs.addColorStop(0, `hsla(${H}, ${SAT_LOCK}%, ${lightMulS}%, ${ac * 0.55})`)
           gs.addColorStop(0.55, `hsla(${H}, ${SAT_LOCK}%, ${lightMulS - 8}%, ${ac * 0.12})`)
           gs.addColorStop(1, `hsla(${H}, ${SAT_LOCK}%, ${lightMulS}%, 0)`)
           ctx.fillStyle = gs
           ctx.beginPath()
-          ctx.arc(p.x, p.y, tight, 0, Math.PI * 2)
+          ctx.arc(drawX, drawY, tight, 0, Math.PI * 2)
           ctx.fill()
+          if (fmNorm > 0.18) {
+            const cs = Math.max(0.25, fmNorm * 0.95)
+            ctx.strokeStyle = `hsla(${(H + 22) % 360}, ${SAT_LOCK}%, 92%, ${ac * 0.18})`
+            ctx.lineWidth = 0.6
+            ctx.beginPath()
+            ctx.arc(drawX + cs, drawY, Math.max(0.7, radiusCore * 0.24), 0, Math.PI * 2)
+            ctx.stroke()
+          }
           continue
         }
 
@@ -578,7 +660,7 @@ export function PhotonModule() {
         const darkL = Math.max(0, Math.min(100, lightMul - 16))
         const rimL = Math.min(100, lightMul + 10)
 
-        const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, outer)
+        const g = ctx.createRadialGradient(drawX, drawY, 0, drawX, drawY, outer)
         g.addColorStop(0, `hsla(${H}, ${SAT_LOCK}%, ${coreL}%, ${a * 0.88})`)
         g.addColorStop(0.38, `hsla(${H}, ${SAT_LOCK}%, ${darkL}%, ${a * 0.72})`)
         g.addColorStop(0.68, `hsla(${H}, ${SAT_LOCK}%, ${lightMul}%, ${a * 0.42})`)
@@ -587,7 +669,7 @@ export function PhotonModule() {
 
         ctx.fillStyle = g
         ctx.beginPath()
-        ctx.arc(p.x, p.y, outer, 0, Math.PI * 2)
+        ctx.arc(drawX, drawY, outer, 0, Math.PI * 2)
         ctx.fill()
       }
 
@@ -645,10 +727,42 @@ export function PhotonModule() {
           triggerPhotonBleep(0.34 + Math.random() * 0.22, 0.35 + Math.random() * 0.28, Math.random())
         }
       }
-      const audioBoost = 1 + audioBassRef.current * 0.45
-      const audioPitch = 1 + audioTrebleRef.current * 0.55
-      const brI = Math.min(1, baseBrI * audioBoost)
-      const brHz = baseBrHz * audioPitch
+      if (audioEnabledRef.current && photonMeterRef.current && photonFftRef.current) {
+        const meterVal = photonMeterRef.current.getValue()
+        const db = Number.isFinite(meterVal) ? meterVal : -120
+        const levelTarget = Math.max(0, Math.min(1, Tone.dbToGain(db) * 2.2))
+        audioLevelRef.current += (levelTarget - audioLevelRef.current) * 0.16
+
+        const fftVals = photonFftRef.current.getValue()
+        let low = 0
+        let high = 0
+        let lowN = 0
+        let highN = 0
+        for (let i = 1; i <= 6 && i < fftVals.length; i++) {
+          low += Math.max(0, (fftVals[i] + 120) / 120)
+          lowN++
+        }
+        for (let i = 10; i <= 24 && i < fftVals.length; i++) {
+          high += Math.max(0, (fftVals[i] + 120) / 120)
+          highN++
+        }
+        const lowAvg = lowN ? low / lowN : 0
+        const highAvg = highN ? high / highN : 0
+        const freqTarget = highAvg / (highAvg + lowAvg + 1e-4)
+        audioFreqNormRef.current += (freqTarget - audioFreqNormRef.current) * 0.14
+      } else {
+        audioLevelRef.current *= 0.96
+        audioFreqNormRef.current *= 0.96
+      }
+      const targetMotion = Math.max(
+        0,
+        Math.min(1, audioTrebleRef.current * 0.9 + audioBassRef.current * 0.35),
+      )
+      audioMotionRef.current += (targetMotion - audioMotionRef.current) * 0.08
+      const motion = audioMotionRef.current
+      const audioBoost = 1 + audioBassRef.current * 0.32
+      const brI = Math.min(1, baseBrI * (0.88 + motion * 0.45) * audioBoost)
+      const brHz = baseBrHz * (0.72 + motion * 0.38)
 
       // 仅用于 WebKit 路径：预渲染 sprite
       const desiredKey = `${H}|${Lb}|${Math.round(glowSpread * 1000) / 1000}`
@@ -678,12 +792,31 @@ export function PhotonModule() {
         p.breathPhase = Math.random() * Math.PI * 2
         p.flickerPhase = Math.random() * Math.PI * 2
         p.isSharpPhoton = Math.random() < sharpPhotonRatioRef.current
+        p.offsetX = 0
+        p.offsetY = 0
+        p.assignedFrequency = 180 + Math.random() * 2200
         frameRespawns += 1
       }
       for (let i = 0; i < parts.length; i++) {
         const p = parts[i]
         p.x += p.vx * vPps * p.spdJ * dt
         p.y += p.vy * vPps * p.spdJ * dt
+        const amp = audioLevelRef.current
+        const freqNorm = audioFreqNormRef.current
+        const pNorm = Math.max(0.08, Math.min(1.8, (p.assignedFrequency || 600) / 1200))
+        const jitterRate = 0.8 + freqNorm * 8.2 * pNorm
+        const vibAmp = amp * (5 + 14 * pNorm)
+        const targetOx = Math.sin(tSec * jitterRate + (p.breathPhase || 0)) * vibAmp
+        const targetOy = Math.cos(tSec * (jitterRate * 0.83) + (p.flickerPhase || 0)) * vibAmp * 0.72
+        const settle = 0.12 + amp * 0.2
+        p.offsetX = (p.offsetX || 0) + (targetOx - (p.offsetX || 0)) * settle
+        p.offsetY = (p.offsetY || 0) + (targetOy - (p.offsetY || 0)) * settle
+        const microJitter = amp * (0.22 + freqNorm * 1.05) * pNorm
+        p.offsetX += (Math.random() - 0.5) * microJitter
+        p.offsetY += (Math.random() - 0.5) * microJitter
+        const convergence = 0.82 + (1 - amp) * 0.14
+        p.offsetX *= convergence
+        p.offsetY *= convergence
 
         const rawDiff =
           Math.hypot(p.x - p.spawnX, p.y - p.spawnY) / (maxDiff || 1)
@@ -718,8 +851,10 @@ export function PhotonModule() {
 
       for (let i = 0; i < parts.length; i++) {
         const p = parts[i]
+        const drawX = p.x + (p.offsetX || 0)
+        const drawY = p.y + (p.offsetY || 0)
         const diff =
-          Math.hypot(p.x - p.spawnX, p.y - p.spawnY) / (maxDiff || 1)
+          Math.hypot(drawX - p.spawnX, drawY - p.spawnY) / (maxDiff || 1)
         // 扩散距离增长采用 ease-out：先快后慢（d 越小增长越快，d 越大越接近上限）
         const t = Math.max(0, Math.min(1, diff))
         const easedT = 1 - Math.pow(1 - t, SPREAD_EASE_POWER)
@@ -734,14 +869,16 @@ export function PhotonModule() {
           1 -
           brI +
           brI * (0.5 + 0.5 * Math.sin(omega * tSec + (p.breathPhase || 0)))
+        const flickerDepth = Math.min(0.42, fkI * (0.28 + motion * 0.34))
         const flickerWave =
           1 -
-          fkI +
-          fkI * (0.5 + 0.5 * Math.sin(omega * 5.15 * tSec + (p.flickerPhase || 0)))
-        const pulse = Math.max(0.12, breathWave * flickerWave)
+          flickerDepth +
+          flickerDepth * (0.5 + 0.5 * Math.sin(omega * 2.15 * tSec + (p.flickerPhase || 0)))
+        const pulse = Math.max(0.34, breathWave * 0.72 + flickerWave * 0.28)
 
         const alpha = aBase * opacityFade * pulse
         if (alpha <= 0) continue
+        const fmNorm = Math.max(0, Math.min(1, (fmIndexRef.current - 2) / 4.5))
 
         if (p.isSharpPhoton) {
           const boost = Math.min(2.4, sharpBoost)
@@ -757,19 +894,27 @@ export function PhotonModule() {
           ctx.strokeStyle = `hsla(${H}, ${SAT_LOCK}%, 96%, ${ac * 0.88})`
           ctx.lineWidth = 0.75
           ctx.beginPath()
-          ctx.moveTo(p.x - gl, p.y)
-          ctx.lineTo(p.x + gl, p.y)
-          ctx.moveTo(p.x, p.y - gl)
-          ctx.lineTo(p.x, p.y + gl)
+          ctx.moveTo(drawX - gl, drawY)
+          ctx.lineTo(drawX + gl, drawY)
+          ctx.moveTo(drawX, drawY - gl)
+          ctx.lineTo(drawX, drawY + gl)
           ctx.stroke()
           ctx.fillStyle = `hsla(${H}, ${SAT_LOCK}%, 100%, ${ac})`
           ctx.beginPath()
-          ctx.arc(p.x, p.y, Math.max(0.65, radiusCore * 0.22), 0, Math.PI * 2)
+          ctx.arc(drawX, drawY, Math.max(0.65, radiusCore * 0.22), 0, Math.PI * 2)
           ctx.fill()
-          ctx.fillStyle = `hsla(${H}, ${SAT_LOCK}%, ${Math.min(100, Lb + (100 - Lb) * 0.35)}%, ${ac * 0.38})`
+          ctx.fillStyle = `hsla(${H}, ${SAT_LOCK}%, ${Math.min(100, Lb + (100 - Lb) * 0.35)}%, ${ac * (0.32 + fmNorm * 0.1)})`
           ctx.beginPath()
-          ctx.arc(p.x, p.y, radius * glowSpread * 0.36, 0, Math.PI * 2)
+          ctx.arc(drawX, drawY, radius * glowSpread * (0.32 + fmNorm * 0.12), 0, Math.PI * 2)
           ctx.fill()
+          if (fmNorm > 0.18) {
+            const cs = Math.max(0.25, fmNorm * 0.95)
+            ctx.strokeStyle = `hsla(${(H + 22) % 360}, ${SAT_LOCK}%, 92%, ${ac * 0.18})`
+            ctx.lineWidth = 0.6
+            ctx.beginPath()
+            ctx.arc(drawX + cs, drawY, Math.max(0.7, radiusCore * 0.24), 0, Math.PI * 2)
+            ctx.stroke()
+          }
           continue
         }
 
@@ -779,7 +924,7 @@ export function PhotonModule() {
         const r = spriteRadii[idx]
 
         ctx.globalAlpha = alpha
-        ctx.drawImage(sprite, p.x - r, p.y - r)
+        ctx.drawImage(sprite, drawX - r, drawY - r)
       }
 
       ctx.globalAlpha = 1
@@ -814,6 +959,8 @@ export function PhotonModule() {
     return () => {
       try {
         photonSynthRef.current?.dispose()
+        photonMeterRef.current?.dispose()
+        photonFftRef.current?.dispose()
         photonLimiterRef.current?.dispose()
         photonWidenerRef.current?.dispose()
         photonReverbRef.current?.dispose()
@@ -822,10 +969,15 @@ export function PhotonModule() {
         // ignore dispose failures during rapid remounts
       }
       photonSynthRef.current = null
+      photonMeterRef.current = null
+      photonFftRef.current = null
       photonLimiterRef.current = null
       photonWidenerRef.current = null
       photonReverbRef.current = null
       photonMasterRef.current = null
+      audioLevelRef.current = 0
+      audioFreqNormRef.current = 0
+      audioMotionRef.current = 0
       audioReadyRef.current = false
     }
   }, [])
@@ -1050,6 +1202,9 @@ export function PhotonModule() {
               } else {
                 audioBassRef.current = 0
                 audioTrebleRef.current = 0
+                audioLevelRef.current = 0
+                audioFreqNormRef.current = 0
+                audioMotionRef.current = 0
                 setAudioEnabled(false)
               }
             }}

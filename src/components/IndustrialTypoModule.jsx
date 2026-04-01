@@ -62,6 +62,13 @@ export function IndustrialTypoModule({ fontFamily }) {
   const [audioWanted, setAudioWanted] = useState(true)
   const [oscVol, setOscVol] = useState(0) // 实时显示用
   const [fluidVol, setFluidVol] = useState(0)
+  const [stereoMode, setStereoMode] = useState('pingpong') // pingpong | crossover | phase
+  const [phaseInverted, setPhaseInverted] = useState(false)
+  const [phaseAlert, setPhaseAlert] = useState(false)
+  const [blindTarget, setBlindTarget] = useState('')
+  const [blindHint, setBlindHint] = useState('') // 盲测反馈
+  const [leftRatio, setLeftRatio] = useState(50)
+  const [rightRatio, setRightRatio] = useState(50)
 
   // Tone.js 合成器实例（ref，effect 外创建）
   const fmSynthRef = useRef(null)
@@ -69,10 +76,15 @@ export function IndustrialTypoModule({ fontFamily }) {
   const fluidFilterRef = useRef(null)
   const fluidLFORef = useRef(null)
   const oscPannerRef = useRef(null)
+  const fluidPannerRef = useRef(null)
   const oscDelayRef = useRef(null)
   const oscDetuneLfoRef = useRef(null)
   const oscGainRef = useRef(null)
   const fluidGainRef = useRef(null)
+  const phaseLeftSynthRef = useRef(null)
+  const phaseRightSynthRef = useRef(null)
+  const phaseLeftGainRef = useRef(null)
+  const phaseRightGainRef = useRef(null)
   const masterGainRef = useRef(null)
   const audioInitializedRef = useRef(false)
   const rafIdRef = useRef(null)
@@ -80,6 +92,7 @@ export function IndustrialTypoModule({ fontFamily }) {
   const mouseYRef = useRef(0.5) // 0=top, 1=bottom
   const mouseXRef = useRef(0.5) // 0=left, 1=right
   const tickIntervalRef = useRef(null)
+  const blindUntilRef = useRef(0)
 
   // 初始化所有合成器（首次用户交互后调用）
   const initAudio = useCallback(async () => {
@@ -92,7 +105,7 @@ export function IndustrialTypoModule({ fontFamily }) {
     // ── 示波器滴声：FMSynth（调频合成，金属质感）──────────────────
     const oscGain = new Tone.Gain(0.0).connect(master)
     oscGainRef.current = oscGain
-    const oscPan = new Tone.Panner(0)
+    const oscPan = new Tone.Panner(-1)
     oscPannerRef.current = oscPan
     const oscDelay = new Tone.PingPongDelay({
       delayTime: '16n',
@@ -133,8 +146,10 @@ export function IndustrialTypoModule({ fontFamily }) {
       type: 'lowpass',
       frequency: 400,
       Q: 3.5,
-    }).connect(fGain)
+    })
     fluidFilterRef.current = fluidFilter
+    const fluidPan = new Tone.Panner(1).connect(fGain)
+    fluidPannerRef.current = fluidPan
     const am = new Tone.AMSynth({
       harmonicity: 0.25,
       modulationIndex: 12,
@@ -161,6 +176,25 @@ export function IndustrialTypoModule({ fontFamily }) {
     }).connect(fluidFilter.frequency)
     fluidLFORef.current = lfo
     am.connect(fluidFilter)
+    fluidFilter.connect(fluidPan)
+
+    // ── 相位检测通道：同频双正弦（可翻转右声道相位）──────────────
+    const phaseLeftGain = new Tone.Gain(0).connect(master)
+    const phaseRightGain = new Tone.Gain(0).connect(master)
+    phaseLeftGainRef.current = phaseLeftGain
+    phaseRightGainRef.current = phaseRightGain
+    const phaseLeftPan = new Tone.Panner(-1).connect(phaseLeftGain)
+    const phaseRightPan = new Tone.Panner(1).connect(phaseRightGain)
+    const phaseLeftSynth = new Tone.Synth({
+      oscillator: { type: 'sine' },
+      envelope: { attack: 0.02, decay: 0.08, sustain: 1, release: 0.2 },
+    }).connect(phaseLeftPan)
+    const phaseRightSynth = new Tone.Synth({
+      oscillator: { type: 'sine' },
+      envelope: { attack: 0.02, decay: 0.08, sustain: 1, release: 0.2 },
+    }).connect(phaseRightPan)
+    phaseLeftSynthRef.current = phaseLeftSynth
+    phaseRightSynthRef.current = phaseRightSynth
 
     // 必须在用户手势中调用 Tone.start()，再启动 LFO/触发音源，避免 suspended 警告
     try {
@@ -177,6 +211,8 @@ export function IndustrialTypoModule({ fontFamily }) {
     // Drone 作为底层持续音源，靠 crossfade/gain 控制可听占比
     // 轻微抬高 Fluid 基频，让低频感稍微更高一些
     am.triggerAttack(124)
+    phaseLeftSynth.triggerAttack(110)
+    phaseRightSynth.triggerAttack(110)
 
     // 真实音频引擎状态：驱动后续 RAF crossfade/tick 逻辑
     audioInitializedRef.current = true
@@ -187,15 +223,23 @@ export function IndustrialTypoModule({ fontFamily }) {
   const triggerTick = (mouseY) => {
     const fm = fmSynthRef.current
     if (!fm) return
-    // Y 越靠上 → 音高越高（整体下移一八度，听感更稳）
-    const baseFreq = 140 + (1 - mouseY) * 310
+    // 模式音色微调：A 更亮更脆，B 适中，C 仅保留轻量检测音色
+    let baseFreq = 900 + (1 - mouseY) * 1200
+    let duration = 0.16
+    if (stereoMode === 'pingpong') {
+      baseFreq = 1400 + (1 - mouseY) * 2200
+      duration = 0.1
+    } else if (stereoMode === 'phase') {
+      baseFreq = 700 + (1 - mouseY) * 600
+      duration = 0.2
+    }
     // ±大二度范围内随机偏移，模拟不规则扫描
     const freq = baseFreq * (1 + (Math.random() - 0.5) * 0.06)
     // X 位置控制声像（左右）
     if (oscPannerRef.current) {
       oscPannerRef.current.pan.rampTo((mouseXRef.current - 0.5) * 2, 0.02)
     }
-    fm.triggerAttackRelease(freq, 0.26)
+    fm.triggerAttackRelease(freq, duration)
   }
 
   // 清除所有音频资源
@@ -216,7 +260,18 @@ export function IndustrialTypoModule({ fontFamily }) {
     }
     amSynthRef.current?.dispose()
     fluidFilterRef.current?.dispose()
+    fluidPannerRef.current?.dispose()
     fluidLFORef.current?.dispose()
+    try {
+      phaseLeftSynthRef.current?.triggerRelease()
+      phaseRightSynthRef.current?.triggerRelease()
+    } catch {
+      /* */
+    }
+    phaseLeftSynthRef.current?.dispose()
+    phaseRightSynthRef.current?.dispose()
+    phaseLeftGainRef.current?.dispose()
+    phaseRightGainRef.current?.dispose()
     oscDelayRef.current?.dispose()
     oscPannerRef.current?.dispose()
     oscGainRef.current?.dispose()
@@ -226,11 +281,16 @@ export function IndustrialTypoModule({ fontFamily }) {
     amSynthRef.current = null
     fluidFilterRef.current = null
     fluidLFORef.current = null
+    fluidPannerRef.current = null
     oscDelayRef.current = null
     oscDetuneLfoRef.current = null
     oscPannerRef.current = null
     oscGainRef.current = null
     fluidGainRef.current = null
+    phaseLeftSynthRef.current = null
+    phaseRightSynthRef.current = null
+    phaseLeftGainRef.current = null
+    phaseRightGainRef.current = null
     masterGainRef.current = null
     audioInitializedRef.current = false
   }
@@ -288,7 +348,7 @@ export function IndustrialTypoModule({ fontFamily }) {
     return () => container.removeEventListener('mousemove', handleMouseMove)
   }, [])
 
-  // 主音频循环（RAF + Crossfade + LFO 频率跟随 hue drift）
+  // 主音频循环（三模式立体声检测）
   useEffect(() => {
     if (!audioInitializedRef.current) return
 
@@ -296,30 +356,66 @@ export function IndustrialTypoModule({ fontFamily }) {
 
     const tickRaf = () => {
       tickCounterRef.current = (tickCounterRef.current + 1) || 0
+      const nowSec = performance.now() / 1000
+      const blindActive = nowSec < blindUntilRef.current && (blindTarget === 'LEFT' || blindTarget === 'RIGHT')
+      const side = Math.floor(nowSec / 2) % 2 === 0 ? 'LEFT' : 'RIGHT'
+      const activeSide = blindActive ? blindTarget : side
+      const t = Math.max(0, Math.min(1, mouseYRef.current))
+      const cross = t * t * (3 - 2 * t) // smoothstep
+      const baseOsc = 1 - cross
+      const baseFluid = cross
+      const balanceNorm = Math.max(0, Math.min(1, mouseXRef.current))
+      const leftMul = 0.2 + (1 - balanceNorm) * 1.6
+      const rightMul = 0.2 + balanceNorm * 1.6
 
-      const mouseY = mouseYRef.current
-      // Crossfade 曲线：mouseY=0(top) → fluid=0, osc=1；mouseY=1(bottom) → fluid=1, osc=0
-      // 使用 smoothstep 曲线避免硬切换
-      const t = Math.max(0, Math.min(1, mouseY))
-      const crossfade = t * t * (3 - 2 * t) // smoothstep
-      const fluidWeight = crossfade   // 0=top(osc), 1=bottom(fluid)
-      const oscWeight = 1 - fluidWeight
+      let oscWeight = baseOsc
+      let fluidWeight = baseFluid
+      let phaseL = 0
+      let phaseR = 0
 
-      // RAF 驱动音量（5ms 过渡，防止爆破音）
-      if (oscGainRef.current) {
-        oscGainRef.current.gain.rampTo(oscWeight * 0.55, 0.005)
+      if (stereoMode === 'pingpong') {
+        const leftFocus = activeSide === 'LEFT' ? 1 : 0.3
+        const rightFocus = activeSide === 'RIGHT' ? 1 : 0.3
+        oscWeight = baseOsc * leftFocus
+        fluidWeight = baseFluid * rightFocus
+      } else if (stereoMode === 'crossover') {
+        if (blindActive) {
+          oscWeight = activeSide === 'LEFT' ? 1 : 0
+          fluidWeight = activeSide === 'RIGHT' ? 1 : 0
+        } else {
+          oscWeight = Math.max(0.22, baseOsc * 0.9)
+          fluidWeight = Math.max(0.22, baseFluid * 0.9)
+        }
+      } else {
+        // Phase 模式仍保留鼠标上下主映射，但幅度更克制
+        oscWeight = baseOsc * 0.36
+        fluidWeight = baseFluid * 0.36
+        phaseL = (blindActive ? (activeSide === 'LEFT' ? 0.35 : 0) : 0.35) * leftMul
+        phaseR = (blindActive ? (activeSide === 'RIGHT' ? 0.35 : 0) : (phaseInverted ? -0.35 : 0.35)) * rightMul
       }
-      if (fluidGainRef.current) {
-        fluidGainRef.current.gain.rampTo(fluidWeight * 0.35, 0.005)
+
+      if (oscPannerRef.current) {
+        oscPannerRef.current.pan.rampTo(-1, 0.02)
+      }
+      if (fluidPannerRef.current) {
+        fluidPannerRef.current.pan.rampTo(1, 0.02)
       }
 
-      // 更新显示
+      // 仅在 phase 模式启用 phase 通道
+      if (phaseLeftGainRef.current) phaseLeftGainRef.current.gain.rampTo(phaseL, 0.01)
+      if (phaseRightGainRef.current) phaseRightGainRef.current.gain.rampTo(phaseR, 0.01)
+      if (oscGainRef.current) oscGainRef.current.gain.rampTo(oscWeight * 0.55 * leftMul, 0.008)
+      if (fluidGainRef.current) fluidGainRef.current.gain.rampTo(fluidWeight * 0.35 * rightMul, 0.008)
+      setLeftRatio(Math.round((1 - balanceNorm) * 100))
+      setRightRatio(Math.round(balanceNorm * 100))
+
       setOscVol(oscWeight)
       setFluidVol(fluidWeight)
+      setPhaseAlert(stereoMode === 'phase' && phaseInverted)
 
-      // 示波器滴声：降低触发密度，视觉快扫但听感更从容
+      // 高频左声道脉冲
       if (tickCounterRef.current % 16 === 0 && oscWeight > 0.05) {
-        triggerTick(mouseY)
+        triggerTick(0.04)
       }
 
       // LFO 频率跟随 hue drift 速率（hue 越快 → LFO 越快 → 呼吸越急促）
@@ -336,7 +432,64 @@ export function IndustrialTypoModule({ fontFamily }) {
     return () => {
       if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current)
     }
-  }, [audioInitialized])
+  }, [audioInitialized, blindTarget, phaseInverted, stereoMode])
+
+  // 模式切换时做轻量音色重标定
+  useEffect(() => {
+    if (!audioInitializedRef.current) return
+    if (stereoMode === 'pingpong') {
+      fmSynthRef.current?.set({
+        harmonicity: 3.4,
+        modulationIndex: 6.2,
+        envelope: { attack: 0.004, decay: 0.09, sustain: 0.02, release: 0.14 },
+      })
+      amSynthRef.current?.set({
+        harmonicity: 0.2,
+        modulationIndex: 9,
+      })
+      try {
+        amSynthRef.current?.setNote(92)
+        phaseLeftSynthRef.current?.setNote(110)
+        phaseRightSynthRef.current?.setNote(110)
+      } catch {
+        /* */
+      }
+    } else if (stereoMode === 'crossover') {
+      fmSynthRef.current?.set({
+        harmonicity: 2.6,
+        modulationIndex: 4.8,
+        envelope: { attack: 0.01, decay: 0.14, sustain: 0.04, release: 0.2 },
+      })
+      amSynthRef.current?.set({
+        harmonicity: 0.3,
+        modulationIndex: 10,
+      })
+      try {
+        amSynthRef.current?.setNote(118)
+        phaseLeftSynthRef.current?.setNote(110)
+        phaseRightSynthRef.current?.setNote(110)
+      } catch {
+        /* */
+      }
+    } else {
+      fmSynthRef.current?.set({
+        harmonicity: 2.2,
+        modulationIndex: 3.8,
+        envelope: { attack: 0.015, decay: 0.2, sustain: 0.02, release: 0.24 },
+      })
+      amSynthRef.current?.set({
+        harmonicity: 0.24,
+        modulationIndex: 8,
+      })
+      try {
+        amSynthRef.current?.setNote(110)
+        phaseLeftSynthRef.current?.setNote(96)
+        phaseRightSynthRef.current?.setNote(96)
+      } catch {
+        /* */
+      }
+    }
+  }, [audioInitialized, stereoMode])
 
   // 音频开启/关闭：默认希望为开启状态
   const toggleAudio = async () => {
@@ -349,6 +502,25 @@ export function IndustrialTypoModule({ fontFamily }) {
     } else {
       setAudioWanted(true)
       await initAudio()
+    }
+  }
+
+  const startBlindTest = () => {
+    const target = Math.random() > 0.5 ? 'LEFT' : 'RIGHT'
+    blindUntilRef.current = performance.now() / 1000 + 1.4
+    setBlindTarget(target)
+    setBlindHint('Blind: which side is playing? click top=LEFT / bottom=RIGHT')
+  }
+
+  const handleStudioClick = (e) => {
+    setBottomLogoColor((c) => (c === '#000000' ? '#FFFFFF' : '#000000'))
+    if (performance.now() / 1000 <= blindUntilRef.current) {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const y = (e.clientY - rect.top) / rect.height
+      const guess = y < 0.5 ? 'LEFT' : 'RIGHT'
+      setBlindHint(guess === blindTarget ? 'Blind test: correct' : `Blind test: wrong (${blindTarget})`)
+      blindUntilRef.current = 0
+      setBlindTarget('')
     }
   }
 
@@ -416,6 +588,10 @@ export function IndustrialTypoModule({ fontFamily }) {
     textShadow: '0 0 2px rgba(0,0,0,0.5), 0 1px 2px rgba(0,0,0,0.4)',
     pointerEvents: 'none',
   }
+  const channelLabelStyle = {
+    ...labelStyle,
+    textShadow: 'none',
+  }
 
   // 字体未加载时显示Loading
   if (!fontLoaded) {
@@ -435,7 +611,7 @@ export function IndustrialTypoModule({ fontFamily }) {
       id="industrial-typo-root"
       className="w-full h-full flex flex-col relative cursor-pointer"
       style={{ ...containerStyle, fontFamily: fontFamily ?? 'Inter, sans-serif' }}
-      onClick={() => setBottomLogoColor((c) => c === '#000000' ? '#FFFFFF' : '#000000')}
+      onClick={handleStudioClick}
     >
       {/* 左上角 - 色值 + 走马灯速率，小字固定白+描边始终可见 */}
       <div className="absolute top-4 left-4 font-mono z-[30]" style={labelStyle}>
@@ -443,9 +619,15 @@ export function IndustrialTypoModule({ fontFamily }) {
         <div title="轨迹/高亮">Trace: {traceColorHex}</div>
         <div title="走马灯颜色切换速率 (index/s)">Creep: {creepRateLabel}</div>
       </div>
+      <div className="absolute top-1/4 -translate-y-1/2 right-4 z-[30] font-mono text-[10px]" style={channelLabelStyle}>
+        CH-L {leftRatio}%
+      </div>
+      <div className="absolute top-3/4 -translate-y-1/2 right-4 z-[30] font-mono text-[10px]" style={channelLabelStyle}>
+        CH-R {rightRatio}%
+      </div>
 
       {/* 中心 SVG Logo 示波器追踪模式 */}
-      <div className="flex-1 flex items-center justify-center relative overflow-hidden" style={{ backgroundColor: '#050508' }} onClick={() => setBottomLogoColor(c => c === '#000000' ? '#FFFFFF' : '#000000')}>
+      <div className="flex-1 flex items-center justify-center relative overflow-hidden" style={{ backgroundColor: '#050508' }}>
         {/* 10px 像素网格背景 */}
         <div 
           className="absolute inset-0 pointer-events-none opacity-30"
@@ -496,84 +678,121 @@ export function IndustrialTypoModule({ fontFamily }) {
           </svg>
         </div>
         
-        {/* 触发区：只有鼠标进入顶部按钮附近才显示三按钮 */}
+        {/* 中央消隐控制区：单排统一样式 */}
         <div
-          className="absolute top-0 left-1/2 -translate-x-1/2 z-20 w-56 h-14 flex items-center justify-center"
+          className="absolute top-0 left-1/2 -translate-x-1/2 z-20 w-[min(98vw,1120px)] h-14 flex items-center justify-center"
           onMouseEnter={() => setShowColorButtons(true)}
           onMouseLeave={() => setShowColorButtons(false)}
         >
           <div
-            className={`flex gap-1 transition-opacity duration-200 ${
+            className={`flex items-center gap-1 whitespace-nowrap transition-opacity duration-200 ${
               showColorButtons ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
             }`}
           >
             {colorModes.map((mode) => (
+              <button
+                key={mode.id}
+                onClick={() => setColorTestMode(colorTestMode === mode.id ? 'none' : mode.id)}
+                className="px-2 py-1 text-[9px] font-mono rounded transition-all"
+                style={{
+                  backgroundColor: colorTestMode === mode.id ? 'rgba(255,255,255,0.86)' : 'rgba(0,0,0,0.6)',
+                  color: colorTestMode === mode.id ? '#000' : 'rgba(255,255,255,0.82)',
+                  border: '1px solid rgba(255,255,255,0.25)',
+                }}
+              >
+                {mode.label}
+              </button>
+            ))}
+            {[
+              { id: 'pingpong', label: 'PingPong' },
+              { id: 'crossover', label: 'Xover' },
+              { id: 'phase', label: 'Phase' },
+            ].map((m) => (
+              <button
+                key={m.id}
+                onClick={() => setStereoMode(m.id)}
+                className="px-2 py-1 text-[9px] font-mono rounded transition-all"
+                style={{
+                  backgroundColor: stereoMode === m.id ? 'rgba(255,255,255,0.86)' : 'rgba(0,0,0,0.6)',
+                  color: stereoMode === m.id ? '#000' : 'rgba(255,255,255,0.82)',
+                  border: '1px solid rgba(255,255,255,0.25)',
+                }}
+                title={`mode ${m.label}`}
+              >
+                {m.label}
+              </button>
+            ))}
             <button
-              key={mode.id}
-              onClick={() => setColorTestMode(colorTestMode === mode.id ? 'none' : mode.id)}
-              className="px-3 py-1.5 text-[10px] font-ui tracking-wider rounded transition-all"
-              style={{
-                backgroundColor: colorTestMode === mode.id ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.6)',
-                color: colorTestMode === mode.id ? '#000' : 'rgba(255,255,255,0.7)',
-                border: '1px solid rgba(255,255,255,0.2)',
-              }}
-            >
-              {mode.label}
-            </button>
-          ))}
-            <button
-              onClick={() => setPaused((p) => !p)}
-              className="flex items-center justify-center w-8 h-8 rounded transition-all"
+              onClick={startBlindTest}
+              className="px-2 py-1 text-[9px] font-mono rounded transition-all"
               style={{
                 backgroundColor: 'rgba(0,0,0,0.6)',
-                border: '1px solid rgba(255,255,255,0.2)',
+                color: 'rgba(255,255,255,0.82)',
+                border: '1px solid rgba(255,255,255,0.25)',
+              }}
+              title="随机播放单边，点击上下区域作答"
+            >
+              blind
+            </button>
+            {stereoMode === 'phase' && (
+              <button
+                onClick={() => setPhaseInverted((v) => !v)}
+                className="px-2 py-1 text-[9px] font-mono rounded transition-all"
+                style={{
+                  backgroundColor: phaseInverted ? 'rgba(255,80,80,0.18)' : 'rgba(0,0,0,0.6)',
+                  color: phaseInverted ? '#ff8a8a' : 'rgba(255,255,255,0.82)',
+                  border: '1px solid rgba(255,255,255,0.25)',
+                }}
+              >
+                phase {phaseInverted ? 'inv' : 'norm'}
+              </button>
+            )}
+            <button
+              onClick={() => setPaused((p) => !p)}
+              className="px-2 py-1 text-[9px] font-mono rounded transition-all"
+              style={{
+                backgroundColor: 'rgba(0,0,0,0.6)',
+                color: 'rgba(255,255,255,0.82)',
+                border: '1px solid rgba(255,255,255,0.25)',
               }}
               title={paused ? '播放 (下半区 SMPTE/GRAY/FLUID)' : '暂停 (下半区)'}
               aria-label={paused ? '播放' : '暂停'}
             >
-              {paused ? (
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style={{ color: 'rgba(255,255,255,0.9)' }}>
-                  <path d="M8 5v14l11-7z" />
-                </svg>
-              ) : (
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style={{ color: 'rgba(255,255,255,0.9)' }}>
-                  <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
-                </svg>
-              )}
+              {paused ? 'play' : 'pause'}
             </button>
-            {/* FASCA+AISA 音频系统：Tone.js 双合成器 + 十字渐变 */}
             <button
               onClick={toggleAudio}
-              className="flex items-center justify-center w-8 h-8 rounded transition-all"
+              className="px-2 py-1 text-[9px] font-mono rounded transition-all"
               style={{
                 backgroundColor: audioInitialized
                   ? (oscVol > fluidVol ? 'rgba(0,200,255,0.15)' : 'rgba(255,120,0,0.15)')
                   : 'rgba(0,0,0,0.6)',
+                color: audioInitialized ? (oscVol > fluidVol ? '#00C8FF' : '#FF7800') : 'rgba(255,255,255,0.82)',
                 border: `1px solid ${
                   audioInitialized
                     ? (oscVol > fluidVol ? 'rgba(0,200,255,0.6)' : 'rgba(255,120,0,0.6)')
-                    : 'rgba(255,255,255,0.2)'
+                    : 'rgba(255,255,255,0.25)'
                 }`,
               }}
-              title={
-                audioInitialized
-                  ? '点击关闭音频'
-                  : '音频 OFF · 点击开启（Tone.js 合成器）'
-              }
+              title={audioInitialized ? '点击关闭音频' : '音频 OFF · 点击开启'}
               aria-label={audioInitialized ? '关闭音频' : '开启音频'}
             >
-              {audioInitialized ? (
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style={{ color: oscVol > fluidVol ? '#00C8FF' : '#FF7800' }}>
-                  <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0014 7.97v8.05c1.35-.48 2.5-1.5 2.5-3.02z"/>
-                </svg>
-              ) : (
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style={{ color: 'rgba(255,255,255,0.4)' }}>
-                  <path d="M16.5 12A4.5 4.5 0 0014 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 003.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>
-                </svg>
-              )}
+              audio
             </button>
           </div>
         </div>
+
+        {stereoMode === 'phase' && (
+          <div
+            className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-[2px] pointer-events-none"
+            style={{
+              backgroundColor: phaseAlert ? 'rgba(255,90,90,0.95)' : 'rgba(255,255,255,0.35)',
+              boxShadow: phaseAlert ? '0 0 10px rgba(255,90,90,0.9)' : 'none',
+              opacity: phaseAlert ? (0.55 + Math.abs(Math.sin(liveTime * 8)) * 0.45) : 0.6,
+              transition: 'opacity 0.08s linear',
+            }}
+          />
+        )}
 
         {/* SMPTE 彩条 - 色彩索引平移，rAF 驱动，无重渲染 */}
         {colorTestMode === 'smpte' && <SMPTECreepBars speed={1} paused={paused} />}
@@ -598,6 +817,8 @@ export function IndustrialTypoModule({ fontFamily }) {
       <div className="absolute bottom-[52%] left-4 font-mono z-[30]" style={labelStyle}>
         <div title="运行时间 Run time (s)">T · Time: {liveTime.toFixed(2)} s</div>
         <div title="下半区顶部靠近唤出 SMPTE/GRAY/FLUID">Color: hover top to show</div>
+        <div title="立体声检测模式">Stereo: {stereoMode}</div>
+        {blindHint ? <div title="盲测反馈">{blindHint}</div> : null}
         <GlobalShortcutsHint variant="inline" color="rgba(140,140,140,0.9)" />
       </div>
 
