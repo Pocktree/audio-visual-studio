@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import * as Tone from 'tone'
 import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
 import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 
@@ -51,6 +52,28 @@ const PURSUIT_LOGO_PATHS = [
 const PURSUIT_SPEEDS = [480, 960, 1440] // pps
 const TICK_SPACING_PX = 100
 const TICK_LENGTH_PX = 12
+const LOOM_STRINGS = 20
+
+function rowToNote(rowIdx) {
+  const invertedRow = Math.max(0, Math.min(LOOM_STRINGS - 1, LOOM_STRINGS - 1 - rowIdx))
+  const scale = [0, 3, 5, 7, 10]
+  const octave = 2 + Math.floor(invertedRow / scale.length)
+  const degree = scale[invertedRow % scale.length]
+  return Tone.Frequency(12 * (octave + 1) + degree, 'midi').toNote()
+}
+
+function getPartialsByRow(rowIdx) {
+  const t = 1 - rowIdx / Math.max(1, LOOM_STRINGS - 1)
+  return [1, 0.2 + t * 0.4, 0.05 + t * 0.35]
+}
+
+function isUpperChar(ch) {
+  return /[A-Z]/.test(ch)
+}
+
+function isLowerChar(ch) {
+  return /[a-z]/.test(ch)
+}
 
 /** 互补正弦波 clipPath（objectBoundingBox 0-1）：上缘近 0、下缘近 1，奇偶行咬合 */
 function getWavyClipPathD(amplitude = 0.06, cycles = 5, segments = 60) {
@@ -638,10 +661,23 @@ export function ScrollTestModule() {
   const [colorSeed, setColorSeed] = useState(0)    // 每次点 color 在彩色模式下自增，重新随机配色
   const [wavyEdge, setWavyEdge] = useState(true) // 波浪纹边缘，默认开启
   const [pursuitMode, setPursuitMode] = useState(false)
+  const [audioEnabled] = useState(true)
+  const [loomTriggerMode, setLoomTriggerMode] = useState('mouse') // 'auto' | 'mouse'
+  const [harmonyDensity, setHarmonyDensity] = useState(0.35)
   const [pursuitSpeedIndex, setPursuitSpeedIndex] = useState(1) // 0=480, 1=960, 2=1440
   const [pursuitScale, setPursuitScale] = useState(1)
   const [pursuitShadowPx, setPursuitShadowPx] = useState(50) // 虚拟阴影长度 (px)，用于估算 GtG
   const panelRef = useRef(null)
+  const rootRef = useRef(null)
+  const audioReadyRef = useRef(false)
+  const stringVoicesRef = useRef([])
+  const loomBusRef = useRef(null)
+  const rowCharPosRef = useRef(Array.from({ length: LOOM_STRINGS }, () => 0))
+  const rowLastTriggerMsRef = useRef(Array.from({ length: LOOM_STRINGS }, () => 0))
+  const rafAudioRef = useRef(null)
+  const autoSweepRef = useRef({ y: null, targetY: null, speed: 0, dwellMs: 0, lastTs: 0 })
+  const sweepLastRowRef = useRef(-1)
+  const rowStyleRef = useRef([])
 
   const shuffledColorPalette = useMemo(() => shuffleArray(MUTED_PALETTE), [colorSeed])
 
@@ -658,6 +694,322 @@ export function ScrollTestModule() {
       setLogoRowIndices(new Set([idx1, idx2]))
     }, 0)
     return () => clearTimeout(timer)
+  }, [])
+
+  useEffect(() => {
+    rowStyleRef.current = shuffledFonts.slice(0, LOOM_STRINGS)
+  }, [shuffledFonts])
+
+  const triggerString = useCallback(
+    (rowIdx, accent = 1, harmonicNode = false, charType = 'neutral', source = 'auto') => {
+    const voice = stringVoicesRef.current[rowIdx]
+    if (!voice) return
+    const nowMs = performance.now()
+    const minGapMs = source === 'mouse' ? 90 : 125
+    if (!harmonicNode && nowMs - rowLastTriggerMsRef.current[rowIdx] < minGapMs) return
+    rowLastTriggerMsRef.current[rowIdx] = nowMs
+    const style = rowStyleRef.current[rowIdx]
+    const weight = style?.variants?.[0]?.weight ?? 400
+    const isHeavy = weight >= 700
+    const partials = getPartialsByRow(rowIdx)
+    const isBottomHalf = rowIdx >= LOOM_STRINGS / 2
+    const complexity =
+      scrollSpeedMultiplier >= 1.6 ? 'high' : scrollSpeedMultiplier >= 0.9 ? 'mid' : 'low'
+    const lpfCutoff = isBottomHalf
+      ? 1200 - ((rowIdx - LOOM_STRINGS / 2) / Math.max(1, LOOM_STRINGS / 2 - 1)) * 400
+      : 12000
+    voice.pluck.attackNoise = isHeavy ? 1.2 : 0.7
+    voice.pluck.dampening = isHeavy ? 2200 : 5400
+    voice.pluck.resonance = isHeavy ? 0.97 : 0.8
+    voice.rowLpf.frequency.rampTo(Math.max(800, lpfCutoff), 0.02)
+    voice.harmonic.set({
+      oscillator: {
+        type: 'sine',
+        partials,
+      },
+    })
+    voice.gain.gain.rampTo((isHeavy ? 0.48 : 0.34) * accent, 0.01)
+    voice.pan.pan.rampTo(((rowIdx / Math.max(1, LOOM_STRINGS - 1)) - 0.5) * 0.7, 0.01)
+    try {
+      const note = rowToNote(rowIdx)
+      const now = Tone.now()
+      const f0 = Tone.Frequency(note).toFrequency()
+      const isUpper = charType === 'upper'
+      const isLower = charType === 'lower'
+      const isPunct = charType === 'punct'
+      voice.reverbSend.gain.rampTo(isUpper ? 0.24 : 0.04, 0.01)
+      // 1) 物理拨弦本体（Karplus-Strong）
+      voice.pluck.triggerAttack(note, now)
+      // 2) 基频三角波（提供形体感）
+      const baseDur = isUpper ? 0.95 : isLower ? 0.72 : 0.62
+      voice.base.triggerAttackRelease(f0, baseDur, now, 0.72 * accent)
+      // 3) 泛音列叠加（2f0 + 3f0/4f0）
+      const harmonicDur = isUpper ? 0.92 : isLower ? 0.62 : 0.54
+      voice.harmonic.triggerAttackRelease(
+        [f0 * 2, f0 * (isHeavy ? 4 : 3)],
+        harmonicDur,
+        now,
+        (complexity === 'low' ? 0.48 : complexity === 'high' ? 0.24 : 0.34) * accent,
+      )
+      if (isPunct) {
+        voice.base.triggerAttackRelease(Math.max(55, f0 * 0.5), 0.09, now + 0.004, 0.55 * accent)
+      }
+      // 波节位置触发时，额外给一层“玻璃感”人工泛音
+      if (harmonicNode) {
+        voice.harmonic.triggerAttackRelease([f0 * 3, f0 * 4], 0.1, now + 0.003, 0.28 * accent)
+      }
+    } catch {
+      /* */
+    }
+    },
+    [scrollSpeedMultiplier],
+  )
+
+  const initLoomAudio = useCallback(async () => {
+    if (audioReadyRef.current) return true
+    try {
+      await Tone.start()
+      const ctx = Tone.getContext()
+      if (ctx.state !== 'running') await ctx.resume()
+
+      const master = new Tone.Gain(0.82).toDestination()
+      const limiter = new Tone.Limiter(-8)
+      const hpf = new Tone.Filter(400, 'highpass')
+      const reverb = new Tone.Reverb({ decay: 4.8, wet: 0.34 })
+      const preDelay = new Tone.FeedbackDelay({ delayTime: 0.028, feedback: 0.08, wet: 1 })
+      const stereoWidener = new Tone.StereoWidener(0.22)
+      limiter.connect(hpf)
+      hpf.connect(master)
+      reverb.connect(limiter)
+      loomBusRef.current = { master, limiter, hpf, reverb, preDelay, stereoWidener }
+
+      const voices = Array.from({ length: LOOM_STRINGS }, (_, i) => {
+        const rowLpf = new Tone.Filter(12000, 'lowpass')
+        const pan = new Tone.Panner(0)
+        const gain = new Tone.Gain(0.36)
+        const reverbSend = new Tone.Gain(0.06)
+        const pluck = new Tone.PluckSynth({
+          attackNoise: 1,
+          dampening: 4000,
+          resonance: 0.9 + i * 0.004,
+        })
+        const base = new Tone.Synth({
+          oscillator: { type: 'triangle' },
+          envelope: { attack: 0.002, decay: 0.72, sustain: 0, release: 1.8 },
+          volume: -16,
+        })
+        const harmonic = new Tone.PolySynth(Tone.Synth, {
+          oscillator: { type: 'sine', partials: [1, 0.6, 0.4, 0.2] },
+          envelope: { attack: 0.002, decay: 0.9, sustain: 0, release: 2.8 },
+          volume: -18,
+        })
+        pluck.chain(rowLpf, pan, gain, limiter)
+        base.chain(rowLpf, pan, gain, limiter)
+        harmonic.chain(rowLpf, pan, gain, limiter)
+        gain.connect(reverbSend)
+        reverbSend.connect(preDelay)
+        preDelay.connect(stereoWidener)
+        stereoWidener.connect(reverb)
+        return { pluck, base, harmonic, rowLpf, pan, gain, reverbSend }
+      })
+      stringVoicesRef.current = voices
+      audioReadyRef.current = true
+      return true
+    } catch {
+      return false
+    }
+  }, [])
+
+  useEffect(() => {
+    const onFirstGesture = () => {
+      if (!audioEnabled || audioReadyRef.current) return
+      void initLoomAudio()
+    }
+    window.addEventListener('pointerdown', onFirstGesture, { passive: true })
+    window.addEventListener('keydown', onFirstGesture)
+    return () => {
+      window.removeEventListener('pointerdown', onFirstGesture)
+      window.removeEventListener('keydown', onFirstGesture)
+    }
+  }, [audioEnabled, initLoomAudio])
+
+  useEffect(() => {
+    if (loomTriggerMode !== 'auto') return undefined
+    if (!audioEnabled || pursuitMode) return undefined
+    let cancelled = false
+    const ensure = async () => {
+      const ok = await initLoomAudio()
+      if (!ok || cancelled) return
+      const pickTarget = (h) => Math.max(1, Math.random() * Math.max(2, h - 2))
+      const pickSpeed = () => {
+        const base = 160 + Math.random() * 940
+        return base * (0.75 + scrollSpeedMultiplier * 0.35)
+      }
+      const root = rootRef.current
+      const h0 = Math.max(1, root?.clientHeight || window.innerHeight || 1)
+      autoSweepRef.current = {
+        y: pickTarget(h0),
+        targetY: pickTarget(h0),
+        speed: pickSpeed(),
+        dwellMs: 0,
+        lastTs: performance.now(),
+      }
+      // 自动扫弦开启后立即发一个起音
+      const firstRow = Math.max(0, Math.min(LOOM_STRINGS - 1, Math.floor((autoSweepRef.current.y / h0) * LOOM_STRINGS)))
+      if (!logoRowIndices.has(firstRow)) triggerString(firstRow, 0.92, false, 'upper', 'auto')
+
+      const tick = (now) => {
+        const state = autoSweepRef.current
+        const dtMs = Math.min(80, now - state.lastTs)
+        const dt = dtMs / 1000
+        state.lastTs = now
+        const styles = rowStyleRef.current
+        const viewH = Math.max(1, rootRef.current?.clientHeight || window.innerHeight || 1)
+        const complexity =
+          scrollSpeedMultiplier >= 1.6 ? 'high' : scrollSpeedMultiplier >= 0.9 ? 'mid' : 'low'
+        if (loomBusRef.current?.hpf) {
+          const targetHpf = complexity === 'high' ? 900 : complexity === 'mid' ? 360 : 180
+          loomBusRef.current.hpf.frequency.rampTo(targetHpf, 0.03)
+        }
+        if (state.dwellMs > 0) {
+          state.dwellMs -= dtMs
+          if (state.dwellMs <= 0) {
+            state.targetY = pickTarget(viewH)
+            state.speed = pickSpeed()
+          }
+          rafAudioRef.current = requestAnimationFrame(tick)
+          return
+        }
+
+        const prevY = state.y
+        const dir = state.targetY > prevY ? 1 : -1
+        const nextYRaw = prevY + dir * state.speed * dt
+        const reached = (dir > 0 && nextYRaw >= state.targetY) || (dir < 0 && nextYRaw <= state.targetY)
+        const nextY = reached ? state.targetY : nextYRaw
+        state.y = nextY
+
+        const prevRow = Math.max(0, Math.min(LOOM_STRINGS - 1, Math.floor((prevY / viewH) * LOOM_STRINGS)))
+        const curRow = Math.max(0, Math.min(LOOM_STRINGS - 1, Math.floor((nextY / viewH) * LOOM_STRINGS)))
+        if (prevRow !== curRow) {
+          const step = curRow > prevRow ? 1 : -1
+          for (let r = prevRow + step; step > 0 ? r <= curRow : r >= curRow; r += step) {
+            if (logoRowIndices.has(r)) continue
+            const style = styles[r]
+            if (!style) continue
+            const prob =
+              complexity === 'low'
+                ? Math.max(0.55, harmonyDensity)
+                : complexity === 'mid'
+                  ? Math.max(0.35, harmonyDensity * 0.85)
+                  : Math.max(0.22, harmonyDensity * 0.62)
+            if (Math.random() > prob) continue
+            const txt = style?.variants?.[0]?.text ?? ''
+            const idx = rowCharPosRef.current[r] % Math.max(1, txt.length)
+            const ch = txt.length > 0 ? txt[idx] : ' '
+            rowCharPosRef.current[r] = (idx + 1) % Math.max(1, txt.length)
+            const charType = isUpperChar(ch) ? 'upper' : isLowerChar(ch) ? 'lower' : 'punct'
+            triggerString(r, 1, false, charType, 'auto')
+          }
+        }
+        if (reached) {
+          state.dwellMs = 60 + Math.random() * 340
+        }
+        rafAudioRef.current = requestAnimationFrame(tick)
+      }
+      rafAudioRef.current = requestAnimationFrame(tick)
+    }
+    void ensure()
+    return () => {
+      cancelled = true
+      if (rafAudioRef.current) cancelAnimationFrame(rafAudioRef.current)
+      rafAudioRef.current = null
+    }
+  }, [
+    audioEnabled,
+    pursuitMode,
+    scrollSpeedMultiplier,
+    harmonyDensity,
+    initLoomAudio,
+    triggerString,
+    loomTriggerMode,
+    logoRowIndices,
+  ])
+
+  useEffect(() => {
+    if (loomTriggerMode !== 'mouse') return undefined
+    const root = rootRef.current
+    if (!root) return undefined
+    const toRow = (clientY) => {
+      const rect = root.getBoundingClientRect()
+      const t = Math.max(0, Math.min(0.999, (clientY - rect.top) / rect.height))
+      return Math.floor(t * LOOM_STRINGS)
+    }
+    const onMove = (e) => {
+      if (!audioEnabled || pursuitMode) return
+      if (!audioReadyRef.current) {
+        void initLoomAudio()
+        return
+      }
+      const cur = toRow(e.clientY)
+      const prev = sweepLastRowRef.current
+      if (prev < 0) {
+        sweepLastRowRef.current = cur
+        if (!logoRowIndices.has(cur)) triggerString(cur, 1.12, false, 'upper', 'mouse')
+        return
+      }
+      if (cur === prev) return
+      const step = cur > prev ? 1 : -1
+      for (let r = prev + step; step > 0 ? r <= cur : r >= cur; r += step) {
+        if (logoRowIndices.has(r)) continue
+        triggerString(r, 1.18, false, 'lower', 'mouse')
+      }
+      sweepLastRowRef.current = cur
+    }
+    const resetSweep = () => {
+      sweepLastRowRef.current = -1
+    }
+
+    root.addEventListener('pointermove', onMove)
+    root.addEventListener('pointerleave', resetSweep)
+    window.addEventListener('blur', resetSweep)
+    return () => {
+      root.removeEventListener('pointermove', onMove)
+      root.removeEventListener('pointerleave', resetSweep)
+      window.removeEventListener('blur', resetSweep)
+    }
+  }, [audioEnabled, pursuitMode, initLoomAudio, triggerString, logoRowIndices, loomTriggerMode])
+
+  useEffect(() => {
+    return () => {
+      if (rafAudioRef.current) cancelAnimationFrame(rafAudioRef.current)
+      const voices = stringVoicesRef.current
+      stringVoicesRef.current = []
+      audioReadyRef.current = false
+      for (const v of voices) {
+        try {
+          v.pluck.dispose()
+          v.base.dispose()
+          v.harmonic.dispose()
+          v.rowLpf.dispose()
+          v.pan.dispose()
+          v.gain.dispose()
+          v.reverbSend.dispose()
+        } catch {
+          /* */
+        }
+      }
+      try {
+        loomBusRef.current?.stereoWidener?.dispose()
+        loomBusRef.current?.preDelay?.dispose()
+        loomBusRef.current?.reverb?.dispose()
+        loomBusRef.current?.hpf?.dispose()
+        loomBusRef.current?.limiter?.dispose()
+        loomBusRef.current?.master?.dispose()
+      } catch {
+        /* */
+      }
+      loomBusRef.current = null
+    }
   }, [])
 
   // Pursuit Mode 内：[ ] 速度；+ - 缩放；← → 虚拟阴影长度 (量化拖影)
@@ -771,6 +1123,7 @@ export function ScrollTestModule() {
 
   return (
     <div
+      ref={rootRef}
       className="w-full overflow-hidden"
       style={{
         height: '100vh',
@@ -845,6 +1198,21 @@ export function ScrollTestModule() {
             style={{ accentColor: 'white' }}
           />
         </div>
+        <div>
+          <label className="block text-[10px] font-ui mb-1" style={{ color: textColorPanel }}>
+            harmony density: {Math.round(harmonyDensity * 100)}%
+          </label>
+          <input
+            type="range"
+            min="0.1"
+            max="0.95"
+            step="0.05"
+            value={harmonyDensity}
+            onChange={(e) => setHarmonyDensity(Number(e.target.value))}
+            className="w-full"
+            style={{ accentColor: 'white' }}
+          />
+        </div>
         <div className="flex gap-2">
           <button
             type="button"
@@ -900,6 +1268,18 @@ export function ScrollTestModule() {
           }}
         >
           pursuit mode: {pursuitMode ? 'on' : 'off'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setLoomTriggerMode((m) => (m === 'auto' ? 'mouse' : 'auto'))}
+          className="text-[10px] font-ui py-1.5 px-2 border rounded-md w-full text-left"
+          style={{
+            borderColor: 'rgba(255,255,255,0.8)',
+            color: 'rgba(255,255,255,0.95)',
+            background: 'rgba(255,255,255,0.12)',
+          }}
+        >
+          auto sweep: {loomTriggerMode === 'auto' ? 'on' : 'off'}
         </button>
 
         <GlobalShortcutsHint color="rgba(255,255,255,0.45)" />

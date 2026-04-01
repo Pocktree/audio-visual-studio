@@ -69,6 +69,8 @@ export function IndustrialTypoModule({ fontFamily }) {
   const fluidFilterRef = useRef(null)
   const fluidLFORef = useRef(null)
   const oscPannerRef = useRef(null)
+  const oscDelayRef = useRef(null)
+  const oscDetuneLfoRef = useRef(null)
   const oscGainRef = useRef(null)
   const fluidGainRef = useRef(null)
   const masterGainRef = useRef(null)
@@ -90,26 +92,39 @@ export function IndustrialTypoModule({ fontFamily }) {
     // ── 示波器滴声：FMSynth（调频合成，金属质感）──────────────────
     const oscGain = new Tone.Gain(0.0).connect(master)
     oscGainRef.current = oscGain
-    const oscPan = new Tone.Panner(0).connect(oscGain)
+    const oscPan = new Tone.Panner(0)
     oscPannerRef.current = oscPan
+    const oscDelay = new Tone.PingPongDelay({
+      delayTime: '16n',
+      feedback: 0.16,
+      wet: 0.12,
+    }).connect(oscGain)
+    oscDelayRef.current = oscDelay
+    oscPan.connect(oscDelay)
     const fm = new Tone.FMSynth({
-      harmonicity: 3.5,
-      modulationIndex: 8,
+      harmonicity: 2.8,
+      modulationIndex: 4.8,
       oscillator: { type: 'sine' },
       envelope: {
-        attack: 0.001,
-        decay: 0.04,    // 短促
-        sustain: 0,
-        release: 0.06,
+        attack: 0.05,
+        decay: 0.4,
+        sustain: 0.2,
+        release: 0.8,
       },
       modulationEnvelope: {
-        attack: 0.001,
-        decay: 0.02,
-        sustain: 0,
-        release: 0.03,
+        attack: 0.02,
+        decay: 0.28,
+        sustain: 0.08,
+        release: 0.6,
       },
     }).connect(oscPan)
     fmSynthRef.current = fm
+    const oscDetuneLfo = new Tone.LFO({
+      frequency: 0.34,
+      min: -11,
+      max: 11,
+    }).connect(fm.detune)
+    oscDetuneLfoRef.current = oscDetuneLfo
 
     // ── 流体 Drone：AMSynth 调幅合成 + LFO 呼吸滤波器 ───────────
     const fGain = new Tone.Gain(0.0).connect(master)
@@ -158,6 +173,7 @@ export function IndustrialTypoModule({ fontFamily }) {
     }
 
     lfo.start()
+    oscDetuneLfo.start()
     // Drone 作为底层持续音源，靠 crossfade/gain 控制可听占比
     // 轻微抬高 Fluid 基频，让低频感稍微更高一些
     am.triggerAttack(124)
@@ -171,15 +187,15 @@ export function IndustrialTypoModule({ fontFamily }) {
   const triggerTick = (mouseY) => {
     const fm = fmSynthRef.current
     if (!fm) return
-    // Y 越靠上 → 音高越高（280-900Hz）
-    const baseFreq = 280 + (1 - mouseY) * 620
+    // Y 越靠上 → 音高越高（整体下移一八度，听感更稳）
+    const baseFreq = 140 + (1 - mouseY) * 310
     // ±大二度范围内随机偏移，模拟不规则扫描
     const freq = baseFreq * (1 + (Math.random() - 0.5) * 0.06)
     // X 位置控制声像（左右）
     if (oscPannerRef.current) {
       oscPannerRef.current.pan.rampTo((mouseXRef.current - 0.5) * 2, 0.02)
     }
-    fm.triggerAttackRelease(freq, 0.05)
+    fm.triggerAttackRelease(freq, 0.26)
   }
 
   // 清除所有音频资源
@@ -188,6 +204,12 @@ export function IndustrialTypoModule({ fontFamily }) {
     if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current)
     fmSynthRef.current?.dispose()
     try {
+      oscDetuneLfoRef.current?.stop()
+    } catch {
+      /* */
+    }
+    oscDetuneLfoRef.current?.dispose()
+    try {
       amSynthRef.current?.triggerRelease()
     } catch {
       /* */
@@ -195,6 +217,7 @@ export function IndustrialTypoModule({ fontFamily }) {
     amSynthRef.current?.dispose()
     fluidFilterRef.current?.dispose()
     fluidLFORef.current?.dispose()
+    oscDelayRef.current?.dispose()
     oscPannerRef.current?.dispose()
     oscGainRef.current?.dispose()
     fluidGainRef.current?.dispose()
@@ -203,6 +226,8 @@ export function IndustrialTypoModule({ fontFamily }) {
     amSynthRef.current = null
     fluidFilterRef.current = null
     fluidLFORef.current = null
+    oscDelayRef.current = null
+    oscDetuneLfoRef.current = null
     oscPannerRef.current = null
     oscGainRef.current = null
     fluidGainRef.current = null
@@ -292,8 +317,8 @@ export function IndustrialTypoModule({ fontFamily }) {
       setOscVol(oscWeight)
       setFluidVol(fluidWeight)
 
-      // 示波器滴声：每 ~9 帧触发一次（≈ 150ms @ 60fps，与 animateMotion 4.2s 周期近似同步）
-      if (tickCounterRef.current % 9 === 0 && oscWeight > 0.05) {
+      // 示波器滴声：降低触发密度，视觉快扫但听感更从容
+      if (tickCounterRef.current % 16 === 0 && oscWeight > 0.05) {
         triggerTick(mouseY)
       }
 

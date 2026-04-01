@@ -7,12 +7,12 @@
  * 音频联动（AISA + IPAS 规范）：
  * - 低频（Bass，bins 0-20）→ 控制粒子整体亮度与扩散能量
  * - 高频（Treble，bins ~60-120）→ 控制粒子闪烁频率
- * - 需要用户点击激活麦克风（浏览器 Autoplay 策略）
+ * - 需要用户点击激活音频（浏览器 Autoplay 策略）
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import * as Tone from 'tone'
 import { GlobalShortcutsHint } from './GlobalShortcutsHint'
 import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
-import { useAudioEngine } from '../hooks/useAudioEngine'
 
 const BG = '#000000'
 const SAT_LOCK = 100
@@ -29,6 +29,8 @@ const FADE_MS_MAX = 2400
 const MAX_SPREAD_T = 0.987
 /** 尺寸随 t 的缓动：指数越大，初期相对「变大」越快（ease-out） */
 const SPREAD_EASE_POWER = 3.2
+const QUANTUM_SCALE = ['C4', 'Eb4', 'F4', 'G4', 'Bb4', 'C5', 'Eb5', 'F5', 'G5', 'Bb5', 'C6']
+const SPAWN_HIGH_POOL = ['G5', 'Bb5', 'C6', 'Eb6', 'F6', 'G6', 'Bb6']
 
 function detectPhotonRenderTrack() {
   // 严格区分：Blink(Chrome/Edge) vs WebKit(Safari)。
@@ -90,20 +92,18 @@ export function PhotonModule() {
   const [sharpPhotonBoost, setSharpPhotonBoost] = useState(1.15)
   const [showControls, setShowControls] = useState(false)
   const [hudFps, setHudFps] = useState(0)
-  /** 音频激活状态（用户点击开启麦克风） */
+  /** 音频激活状态（用户点击后开启 PHOTON 声音引擎） */
   const [audioEnabled, setAudioEnabled] = useState(false)
-
-  // ── 音频引擎（AISA 规范：频谱解构者）──────────────────────
-  const {
-    connectMicrophone,
-    disconnectMicrophone,
-    getFloatFrequencyData,
-  } = useAudioEngine()
-
-  /** FFT 缓冲区（persistent，避免每帧分配） */
-  const fftBufRef = useRef(null)
   const audioEnabledRef = useRef(false)
-  audioEnabledRef.current = audioEnabled
+  const audioReadyRef = useRef(false)
+  const photonSynthRef = useRef(null)
+  const photonReverbRef = useRef(null)
+  const photonLimiterRef = useRef(null)
+  const photonWidenerRef = useRef(null)
+  const photonMasterRef = useRef(null)
+  const lastBleepAtRef = useRef(0)
+  const lastAmbientBleepAtRef = useRef(0)
+  const lastSpawnBurstAtRef = useRef(0)
   /** 当前帧的音频派生参数（用于动画循环，不触发 React 重渲染） */
   const audioBassRef = useRef(0)
   const audioTrebleRef = useRef(0)
@@ -131,6 +131,114 @@ export function PhotonModule() {
   flickerIntensityRef.current = flickerIntensity
   sharpPhotonRatioRef.current = sharpPhotonRatio
   sharpPhotonBoostRef.current = sharpPhotonBoost
+
+  useEffect(() => {
+    audioEnabledRef.current = audioEnabled
+  }, [audioEnabled])
+
+  const initPhotonAudio = useCallback(async () => {
+    if (audioReadyRef.current) return true
+    try {
+      await Tone.start()
+      const ctx = Tone.getContext()
+      if (ctx.state !== 'running') await ctx.resume()
+
+      const master = new Tone.Gain(0.86).toDestination()
+      const reverb = new Tone.Reverb({
+        decay: 5.4,
+        preDelay: 0.05,
+        wet: 0.68,
+      }).connect(master)
+      const widener = new Tone.StereoWidener(0.11).connect(reverb)
+      const limiter = new Tone.Limiter(-6).connect(widener)
+      const synth = new Tone.PolySynth(Tone.FMSynth, {
+        maxPolyphony: 6,
+        volume: -12,
+        harmonicity: 2,
+        modulationIndex: 3,
+        oscillator: { type: 'sine' },
+        modulation: { type: 'sine' },
+        envelope: {
+          attack: 0.003,
+          decay: 0.1,
+          sustain: 0,
+          release: 0.12,
+        },
+        modulationEnvelope: {
+          attack: 0.001,
+          decay: 0.09,
+          sustain: 0,
+          release: 0.08,
+        },
+      }).connect(limiter)
+
+      photonMasterRef.current = master
+      photonReverbRef.current = reverb
+      photonLimiterRef.current = limiter
+      photonWidenerRef.current = widener
+      photonSynthRef.current = synth
+      audioReadyRef.current = true
+      return true
+    } catch {
+      return false
+    }
+  }, [])
+
+  const triggerPhotonBleep = useCallback(
+    (energy = 0.5, size = 0.5, yNorm = 0.5) => {
+      if (!audioEnabledRef.current || !audioReadyRef.current || !photonSynthRef.current) return
+      const nowMs = performance.now()
+      if (nowMs - lastBleepAtRef.current < 108) return
+      lastBleepAtRef.current = nowMs
+
+      const synth = photonSynthRef.current
+      const e = Math.max(0, Math.min(1, energy))
+      const s = Math.max(0, Math.min(1, size))
+      const y = Math.max(0, Math.min(1, yNorm))
+
+      const idxBase = Math.floor((1 - y) * (QUANTUM_SCALE.length - 1))
+      const jitter = Math.floor(Math.random() * 3) - 1
+      const idx = Math.max(0, Math.min(QUANTUM_SCALE.length - 1, idxBase + jitter))
+      const note = QUANTUM_SCALE[idx]
+      const velocity = Math.max(0.08, Math.min(0.95, 0.2 + e * 0.55 + s * 0.2))
+      const modulationIndex = 2 + e * 2.8
+      const harmonicity = 1.7 + s * 0.9
+      synth.set({ modulationIndex, harmonicity })
+      synth.triggerAttackRelease(note, '32n', undefined, velocity)
+
+      audioTrebleRef.current = Math.max(audioTrebleRef.current, 0.2 + e * 0.8)
+      audioBassRef.current = Math.max(audioBassRef.current, 0.08 + (1 - y) * 0.5)
+    },
+    [],
+  )
+
+  const triggerSpawnChordBurst = useCallback((strength = 0.8) => {
+    if (!audioEnabledRef.current || !audioReadyRef.current || !photonSynthRef.current) return
+    const nowMs = performance.now()
+    if (nowMs - lastSpawnBurstAtRef.current < 220) return
+    lastSpawnBurstAtRef.current = nowMs
+
+    const synth = photonSynthRef.current
+    const s = Math.max(0, Math.min(1, strength))
+    synth.set({
+      modulationIndex: 2.2 + s * 2.2,
+      harmonicity: 1.85 + s * 0.45,
+    })
+
+    const now = Tone.now()
+    const pool = [...SPAWN_HIGH_POOL]
+    const count = 3 + Math.floor(Math.random() * 2)
+    for (let i = 0; i < count; i++) {
+      const idx = Math.floor(Math.random() * pool.length)
+      const note = pool.splice(idx, 1)[0] || 'C6'
+      const vel = Math.max(0.16, Math.min(0.9, 0.34 + s * 0.34 - i * 0.04))
+      const dur = i === 0 ? '16n' : '32n'
+      synth.triggerAttackRelease(note, dur, now + i * 0.017, vel)
+    }
+
+    audioTrebleRef.current = Math.max(audioTrebleRef.current, 0.72 + s * 0.22)
+    audioBassRef.current = Math.max(audioBassRef.current, 0.12 + s * 0.12)
+  }, [])
 
   const resizeAndReset = useCallback(() => {
     const c = canvasRef.current
@@ -330,18 +438,15 @@ export function PhotonModule() {
 
       const glowSpread = 1.12 + blurK * 1.85
 
-      // ── AISA 频谱解析：低频控亮度，高频控闪烁节奏 ──────────
-      if (audioEnabledRef.current && fftBufRef.current) {
-        getFloatFrequencyData(fftBufRef.current)
-        const buf = fftBufRef.current
-        // Bass: bins 2-18（避开 DC offset）
-        let bassSum = 0
-        for (let b = 2; b <= 18; b++) bassSum += Math.max(0, buf[b] + 100)
-        audioBassRef.current = bassSum / 17 / 95
-        // Treble: bins 40-90
-        let trebleSum = 0
-        for (let b = 40; b <= 90; b++) trebleSum += Math.max(0, buf[b] + 100)
-        audioTrebleRef.current = trebleSum / 51 / 95
+      audioBassRef.current *= 0.97
+      audioTrebleRef.current *= 0.97
+      if (audioEnabledRef.current) {
+        const nowMs = performance.now()
+        // 保底脉冲：当长时间没有边界反弹声时，补一颗空灵滴声，避免“几乎无声”。
+        if (nowMs - lastBleepAtRef.current > 1200 && nowMs - lastAmbientBleepAtRef.current > 900) {
+          lastAmbientBleepAtRef.current = nowMs
+          triggerPhotonBleep(0.34 + Math.random() * 0.22, 0.35 + Math.random() * 0.28, Math.random())
+        }
       }
       const audioBoost = 1 + audioBassRef.current * 0.45
       const audioPitch = 1 + audioTrebleRef.current * 0.55
@@ -352,6 +457,7 @@ export function PhotonModule() {
       const omega = Math.PI * 2 * brHz
 
       const parts = particlesRef.current
+      let frameRespawns = 0
       const respawnAtCenter = (p) => {
         const ang = Math.random() * Math.PI * 2
         p.x = cx + (Math.random() - 0.5) * 4
@@ -367,6 +473,7 @@ export function PhotonModule() {
         p.breathPhase = Math.random() * Math.PI * 2
         p.flickerPhase = Math.random() * Math.PI * 2
         p.isSharpPhoton = Math.random() < sharpPhotonRatioRef.current
+        frameRespawns += 1
       }
       for (let i = 0; i < parts.length; i++) {
         const p = parts[i]
@@ -395,6 +502,10 @@ export function PhotonModule() {
         if (p.x < -32 || p.x > w + 32 || p.y < -32 || p.y > h + 32) {
           respawnAtCenter(p)
         }
+
+      }
+      if (audioEnabledRef.current && frameRespawns >= 8) {
+        triggerSpawnChordBurst(Math.min(1, 0.62 + frameRespawns * 0.03))
       }
 
       ctx.globalCompositeOperation = 'lighter'
@@ -525,16 +636,14 @@ export function PhotonModule() {
 
       const glowSpread = 1.12 + blurK * 1.85
 
-      // ── AISA 频谱解析：低频控亮度，高频控闪烁节奏（WebKit 同） ──
-      if (audioEnabledRef.current && fftBufRef.current) {
-        getFloatFrequencyData(fftBufRef.current)
-        const buf = fftBufRef.current
-        let bassSum = 0
-        for (let b = 2; b <= 18; b++) bassSum += Math.max(0, buf[b] + 100)
-        audioBassRef.current = bassSum / 17 / 95
-        let trebleSum = 0
-        for (let b = 40; b <= 90; b++) trebleSum += Math.max(0, buf[b] + 100)
-        audioTrebleRef.current = trebleSum / 51 / 95
+      audioBassRef.current *= 0.97
+      audioTrebleRef.current *= 0.97
+      if (audioEnabledRef.current) {
+        const nowMs = performance.now()
+        if (nowMs - lastBleepAtRef.current > 1200 && nowMs - lastAmbientBleepAtRef.current > 900) {
+          lastAmbientBleepAtRef.current = nowMs
+          triggerPhotonBleep(0.34 + Math.random() * 0.22, 0.35 + Math.random() * 0.28, Math.random())
+        }
       }
       const audioBoost = 1 + audioBassRef.current * 0.45
       const audioPitch = 1 + audioTrebleRef.current * 0.55
@@ -553,6 +662,7 @@ export function PhotonModule() {
       const omega = Math.PI * 2 * brHz
 
       const parts = particlesRef.current
+      let frameRespawns = 0
       const respawnAtCenter = (p) => {
         const ang = Math.random() * Math.PI * 2
         p.x = cx + (Math.random() - 0.5) * 4
@@ -568,6 +678,7 @@ export function PhotonModule() {
         p.breathPhase = Math.random() * Math.PI * 2
         p.flickerPhase = Math.random() * Math.PI * 2
         p.isSharpPhoton = Math.random() < sharpPhotonRatioRef.current
+        frameRespawns += 1
       }
       for (let i = 0; i < parts.length; i++) {
         const p = parts[i]
@@ -596,6 +707,10 @@ export function PhotonModule() {
         if (p.x < -32 || p.x > w + 32 || p.y < -32 || p.y > h + 32) {
           respawnAtCenter(p)
         }
+
+      }
+      if (audioEnabledRef.current && frameRespawns >= 8) {
+        triggerSpawnChordBurst(Math.min(1, 0.62 + frameRespawns * 0.03))
       }
 
       ctx.globalCompositeOperation = 'lighter'
@@ -678,6 +793,40 @@ export function PhotonModule() {
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
       lastTRef.current = null
+    }
+  }, [renderTrack, triggerPhotonBleep, triggerSpawnChordBurst])
+
+  useEffect(() => {
+    const onBurst = async (e) => {
+      if (!audioEnabledRef.current) {
+        const ok = await initPhotonAudio()
+        if (!ok) return
+        setAudioEnabled(true)
+      }
+      const burstStrength = 0.78 + Math.random() * 0.2
+      triggerSpawnChordBurst(burstStrength)
+    }
+    window.addEventListener('pointerdown', onBurst)
+    return () => window.removeEventListener('pointerdown', onBurst)
+  }, [initPhotonAudio, triggerSpawnChordBurst])
+
+  useEffect(() => {
+    return () => {
+      try {
+        photonSynthRef.current?.dispose()
+        photonLimiterRef.current?.dispose()
+        photonWidenerRef.current?.dispose()
+        photonReverbRef.current?.dispose()
+        photonMasterRef.current?.dispose()
+      } catch {
+        // ignore dispose failures during rapid remounts
+      }
+      photonSynthRef.current = null
+      photonLimiterRef.current = null
+      photonWidenerRef.current = null
+      photonReverbRef.current = null
+      photonMasterRef.current = null
+      audioReadyRef.current = false
     }
   }, [])
 
@@ -890,20 +1039,15 @@ export function PhotonModule() {
           />
         </div>
 
-        {/* AISA 音频联动开关：点击激活麦克风，FFT 驱动粒子 */}
+        {/* PHOTON 专属音频引擎：玻璃 FM + 深混响 + 量子音阶 */}
         <div>
           <button
             type="button"
             onClick={async () => {
               if (!audioEnabled) {
-                // 初始化 FFT 缓冲区（一次性分配，复用）
-                if (!fftBufRef.current) {
-                  fftBufRef.current = new Float32Array(2048)
-                }
-                await connectMicrophone()
-                setAudioEnabled(true)
+                const ok = await initPhotonAudio()
+                if (ok) setAudioEnabled(true)
               } else {
-                disconnectMicrophone()
                 audioBassRef.current = 0
                 audioTrebleRef.current = 0
                 setAudioEnabled(false)
@@ -916,11 +1060,11 @@ export function PhotonModule() {
               background: audioEnabled ? 'rgba(0,255,204,0.08)' : 'transparent',
             }}
           >
-            {audioEnabled ? 'AUDIO ON · MIC ACTIVE' : 'AUDIO OFF · TAP TO ENABLE'}
+            {audioEnabled ? 'AUDIO ON · QUANTUM FM' : 'AUDIO OFF · AUTO ON FIRST TAP'}
           </button>
           {audioEnabled && (
             <div className="mt-1 text-center text-[9px]" style={{ color: 'rgba(0,255,204,0.55)' }}>
-              BASS {(audioBassRef.current * 100).toFixed(0)}% · TREBLE {(audioTrebleRef.current * 100).toFixed(0)}%
+              QUANTUM ENERGY {(audioBassRef.current * 100).toFixed(0)}% · GLASS {(audioTrebleRef.current * 100).toFixed(0)}%
             </div>
           )}
         </div>

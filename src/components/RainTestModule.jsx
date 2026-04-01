@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
+import * as Tone from 'tone'
 import { RippleButton } from './RippleButton'
 import { GlobalShortcutsHint, KeyCapButton } from './GlobalShortcutsHint'
 import { STUDIO_LOGO_VIEWBOX, STUDIO_LOGO_PATHS } from './StudioLogoPaths'
@@ -27,22 +28,6 @@ function densityToNoiseGain(d) {
   return 0.004 + shaped * 0.3
 }
 
-function densityToSynthGain(d) {
-  const t = Math.max(0, Math.min(1, (d - DENSITY_AUDIO_MIN) / (DENSITY_AUDIO_MAX - DENSITY_AUDIO_MIN)))
-  return 0.006 + t * t * 0.13
-}
-
-/** 手动模式下：0～100% → 合成器总线增益（与 auto 上限同量级） */
-function manualSynthPctToGain(pct) {
-  const t = Math.max(0, Math.min(100, pct)) / 100
-  return 0.002 + t * t * 0.22
-}
-
-function resolveSynthBusGain(densityVal, auto, manualPct) {
-  if (auto) return densityToSynthGain(densityVal)
-  return manualSynthPctToGain(manualPct)
-}
-
 /** 与面板 speed 滑块 1～30 对齐：慢 → 疏、慢；快 → 密、疾 */
 const SPEED_MIN = 1
 const SPEED_MAX = 30
@@ -54,11 +39,6 @@ function speedNorm(s) {
 function speedToNoiseSparseMul(s) {
   const t = speedNorm(s)
   return 0.12 + 0.88 * Math.pow(t, 1.22)
-}
-
-function speedToSynthSparseMul(s) {
-  const t = speedNorm(s)
-  return 0.2 + 0.8 * Math.pow(t, 1.08)
 }
 
 /** 缓冲噪声播放速率：慢雨 → 更低 playbackRate，听感更「拖、疏」（最慢档再压低） */
@@ -91,6 +71,12 @@ export function RainTestModule() {
   const colorSchemeRef = useRef('default') // 'default' | 'water'
   const lastFpsRef = useRef(0) // 动画循环内每 500ms 更新，用于压力测试时禁止 FPS 跌破半刷新率后继续 +
   const cycleDirectionRef = useRef(1) // 1=递增 -1=递减，用于左下角密度自动循环
+  const dripSynthRef = useRef(null)
+  const dripPannerRef = useRef(null)
+  const dripFilterRef = useRef(null)
+  const dripGainRef = useRef(null)
+  const dripReadyRef = useRef(false)
+  const lastDripAtRef = useRef(0)
 
   const {
     startPinkNoise,
@@ -102,11 +88,9 @@ export function RainTestModule() {
     setUnderwaterMuffling,
     setMasterGain,
     setNoiseGain,
-    setSynthGain,
     setNoisePlaybackRate,
     getVolume,
     checkClipping,
-    setSynthOscillatorCount,
   } = useAudioEngine()
 
   const [noiseMode, setNoiseMode] = useState('pink')
@@ -120,10 +104,6 @@ export function RainTestModule() {
   const [isLightMode, setIsLightMode] = useState(false)
   const [colorScheme, setColorScheme] = useState('default')
   const [showControls, setShowControls] = useState(false)
-  /** true：合成器总线随粒子密度自动变化；false：仅用手动滑块 */
-  const [synthBusAuto, setSynthBusAuto] = useState(true)
-  const [synthBusManualPct, setSynthBusManualPct] = useState(42)
-
   const noiseModeRef = useRef('pink')
   noiseModeRef.current = noiseMode
 
@@ -131,8 +111,6 @@ export function RainTestModule() {
     const d = densityRef.current
     const spd = speedRef.current
     const ng = densityToNoiseGain(d) * speedToNoiseSparseMul(spd)
-    const sg =
-      resolveSynthBusGain(d, synthBusAuto, synthBusManualPct) * speedToSynthSparseMul(spd)
     const pr = speedToNoisePlaybackRate(spd)
     if (mode === 'mute') {
       stopNoise()
@@ -140,7 +118,6 @@ export function RainTestModule() {
       return
     }
     setMasterGain(0.85)
-    setSynthGain(sg)
     if (mode === 'white') {
       await startWhiteNoise(ng, pr)
       return
@@ -156,16 +133,59 @@ export function RainTestModule() {
     startWhiteNoise,
     stopNoise,
     setMasterGain,
-    setSynthGain,
-    synthBusAuto,
-    synthBusManualPct,
   ])
+
+  const initImpactDrip = useCallback(async () => {
+    if (dripReadyRef.current) return
+    try {
+      await Tone.start()
+      const panner = new Tone.Panner(0)
+      const gain = new Tone.Gain(0.082).toDestination()
+      const filter = new Tone.Filter({ type: 'bandpass', frequency: 950, Q: 1.6 })
+      const synth = new Tone.NoiseSynth({
+        noise: { type: 'pink' },
+        envelope: { attack: 0.001, decay: 0.04, sustain: 0, release: 0.12 },
+      })
+      synth.chain(filter, panner, gain)
+      dripSynthRef.current = synth
+      dripPannerRef.current = panner
+      dripFilterRef.current = filter
+      dripGainRef.current = gain
+      dripReadyRef.current = true
+    } catch {
+      /* */
+    }
+  }, [])
+
+  const triggerImpactDrip = useCallback((xNorm, velocityNorm) => {
+    if (!dripReadyRef.current || noiseModeRef.current === 'mute') return
+    const nowMs = performance.now()
+    if (nowMs - lastDripAtRef.current < 34) return
+    lastDripAtRef.current = nowMs
+    const synth = dripSynthRef.current
+    const panner = dripPannerRef.current
+    const filter = dripFilterRef.current
+    const gain = dripGainRef.current
+    if (!synth || !panner || !filter || !gain) return
+    const v = Math.max(0, Math.min(1, velocityNorm))
+    try {
+      panner.pan.rampTo((Math.max(0, Math.min(1, xNorm)) - 0.5) * 1.4, 0.01)
+      gain.gain.rampTo(0.04 + v * 0.06, 0.006)
+      // 随机脉冲：随机中心频率与 Q，模拟不同材质触底，无明确音高
+      filter.frequency.rampTo(420 + Math.random() * 1700, 0.006)
+      filter.Q.rampTo(0.6 + Math.random() * 4.2, 0.006)
+      synth.triggerAttackRelease(
+        0.018 + Math.random() * 0.045,
+        Tone.now(),
+        0.34 + Math.random() * 0.32,
+      )
+    } catch {
+      /* */
+    }
+  }, [])
 
   useEffect(() => {
     const ng = densityToNoiseGain(density) * speedToNoiseSparseMul(speed)
-    const sg =
-      resolveSynthBusGain(density, synthBusAuto, synthBusManualPct) * speedToSynthSparseMul(speed)
-    setSynthGain(sg)
     if (noiseMode !== 'mute') {
       setNoiseGain(ng)
       setNoisePlaybackRate(speedToNoisePlaybackRate(speed))
@@ -174,10 +194,7 @@ export function RainTestModule() {
     density,
     speed,
     noiseMode,
-    synthBusAuto,
-    synthBusManualPct,
     setNoiseGain,
-    setSynthGain,
     setNoisePlaybackRate,
   ])
 
@@ -190,6 +207,7 @@ export function RainTestModule() {
   setHudFpsRef.current = setHudFps
 
   const vuMeterFillRef = useRef(null)
+  const vuPeakRef = useRef(0.02)
 
   // 首次点击画布区域启动当前噪声模式（与 N 循环一致）
   useEffect(() => {
@@ -197,13 +215,24 @@ export function RainTestModule() {
       document.removeEventListener('pointerdown', kick)
       try {
         await applyNoiseMode(noiseModeRef.current)
+        await initImpactDrip()
       } catch {
         /* */
       }
     }
     document.addEventListener('pointerdown', kick, { passive: true })
     return () => document.removeEventListener('pointerdown', kick)
-  }, [applyNoiseMode])
+  }, [applyNoiseMode, initImpactDrip])
+
+  // 进入 RAIN 时立即尝试启动 pink 噪声（useLayoutEffect 更容易复用切模式点击手势）
+  useLayoutEffect(() => {
+    void applyNoiseMode('pink')
+    void initImpactDrip()
+    const retry = setTimeout(() => {
+      void applyNoiseMode('pink')
+    }, 180)
+    return () => clearTimeout(retry)
+  }, [applyNoiseMode, initImpactDrip])
 
   useEffect(() => {
     if (!micOn) {
@@ -219,6 +248,24 @@ export function RainTestModule() {
       disconnectMicrophone()
     }
   }, [micOn, connectMicrophone, disconnectMicrophone])
+
+  useEffect(() => {
+    return () => {
+      dripReadyRef.current = false
+      try {
+        dripSynthRef.current?.dispose()
+        dripPannerRef.current?.dispose()
+        dripFilterRef.current?.dispose()
+        dripGainRef.current?.dispose()
+      } catch {
+        /* */
+      }
+      dripSynthRef.current = null
+      dripPannerRef.current = null
+      dripFilterRef.current = null
+      dripGainRef.current = null
+    }
+  }, [])
 
   const cycleNoiseMode = useCallback(() => {
     const next =
@@ -267,14 +314,6 @@ export function RainTestModule() {
   useEffect(() => {
     setUnderwaterMuffling(colorScheme === 'water')
   }, [colorScheme, setUnderwaterMuffling])
-
-  const lastSynthNRef = useRef(-1)
-  useEffect(() => {
-    const n = Math.min(24, Math.max(1, Math.round(density / 200)))
-    if (n === lastSynthNRef.current) return
-    lastSynthNRef.current = n
-    setSynthOscillatorCount(n)
-  }, [density, setSynthOscillatorCount])
 
   // 鼠标靠近右上角显示控制面板，移开后延迟隐藏
   useEffect(() => {
@@ -432,7 +471,14 @@ export function RainTestModule() {
       const vol = getVolumeRef.current()
       const vuEl = vuMeterFillRef.current
       if (vuEl) {
-        const vuLvl = Math.min(1, vol * 7.5)
+        // 输入音量映射：快速抬峰、慢速回落；接近峰值时直接打满
+        const peak =
+          vol > vuPeakRef.current
+            ? vol
+            : Math.max(0.02, vuPeakRef.current * 0.996)
+        vuPeakRef.current = peak
+        const norm = peak > 1e-6 ? vol / peak : 0
+        const vuLvl = norm >= 0.9 ? 1 : Math.max(0, Math.min(1, Math.pow(norm, 0.45)))
         vuEl.style.transform = `scaleY(${vuLvl})`
       }
       const amp = Math.min(1, vol * 4.2)
@@ -481,7 +527,7 @@ export function RainTestModule() {
       while (linesRef.current.length > currentDensity) {
         linesRef.current.pop()
       }
-      
+
       // 更新和绘制线条
       linesRef.current.forEach(line => {
         // 更新位置
@@ -489,6 +535,13 @@ export function RainTestModule() {
         
         // 如果超出底部，重置到顶部
         if (line.y > h) {
+          // 触底低频滴答（密度越高，概率越低，避免过密）
+          const impactProb = Math.max(0.04, Math.min(0.62, 36 / Math.max(50, currentDensity)))
+          if (Math.random() < impactProb) {
+            const xNorm = line.x / Math.max(1, w)
+            const vNorm = Math.max(0, Math.min(1, line.velocity / Math.max(1, currentSpeed)))
+            triggerImpactDrip(xNorm, vNorm)
+          }
           line.y = -line.length
           line.x = Math.random() * w
           line.velocity = currentSpeed * (0.5 + Math.random() * 0.5)
@@ -531,7 +584,7 @@ export function RainTestModule() {
       window.removeEventListener('resize', resize)
       if (animationId) cancelAnimationFrame(animationId)
     }
-  }, [])
+  }, [triggerImpactDrip])
 
   // 键盘控制
   useEffect(() => {
@@ -672,33 +725,6 @@ export function RainTestModule() {
             color: textColor,
           }}
         >
-          <RippleButton
-            onClick={() => setSynthBusAuto((v) => !v)}
-            className="w-full rounded-md border px-2 py-1 text-left text-[10px] font-ui"
-            style={{
-              borderColor: btnBorder,
-              color: synthBusAuto ? btnActive : textColor,
-            }}
-            title="开：合成器总线随粒子密度；关：仅用手动滑块"
-          >
-            synth bus: {synthBusAuto ? 'auto' : 'manual'}
-          </RippleButton>
-          {!synthBusAuto && (
-            <div>
-              <label className="mb-1 block text-[10px] font-ui" style={{ color: textColor }}>
-                synth level: {synthBusManualPct}%
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                value={synthBusManualPct}
-                onChange={(e) => setSynthBusManualPct(Number(e.target.value))}
-                className="w-full"
-                style={{ accentColor: 'white' }}
-              />
-            </div>
-          )}
           <div
             className="mt-2 space-y-1.5 border-t border-white/10 pt-2 text-[9px] font-ui leading-snug"
             style={{ color: hintShortcutColor }}
@@ -765,8 +791,8 @@ export function RainTestModule() {
             fps: {hudFps.toFixed(0)} · xy: {pointerCoords.x},{pointerCoords.y}
           </div>
           <div title="基准密度（UI）；实际条数随音量调制">particles: {density} (audio-mod)</div>
-          <div title="+ 暴增 500 / − 减少 500；+ 同步提高合成器振荡器数">
-            stress: + / − ±500 · synth ∝ density
+          <div title="声音条为输入音量映射（非 density 映射）">
+            volume meter: mapped from input loudness
           </div>
           <div>
             audio: {noiseMode} · mic: {micOn ? 'on' : 'off'}
